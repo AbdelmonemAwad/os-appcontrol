@@ -11,7 +11,8 @@
  * What is checked: the status script's answer passed on, and one that cannot be read said; the
  * Applications and Unknown grids' rows; and Apply - the aliases, then the filter, cron, the tables of
  * aliases gone and the classifier, in that order; the classifier stopped when classifying is off;
- * nothing after the aliases when they could not be written; nothing at all for a GET.
+ * nothing after the aliases when they could not be written, but the classifier stopped all the same
+ * when classifying is off; nothing at all for a GET.
  *
  *   php tools/test-mvc.php
  */
@@ -147,15 +148,29 @@ namespace {
     Backend::$asked = [];
     (new ServiceController())->reconfigureAction();
     check(end(Backend::$asked) === 'appcontrol stop', 'Apply, classifying off: the classifier stopped');
+    AppControl::$classify = '1';
     Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'failed', 'errors' => ['refused']])];
     Backend::$asked = [];
     $result = (new ServiceController())->reconfigureAction();
     check(Backend::$asked === ['appcontrol apply'] && $result['errors'] === ['refused'],
-        'Apply, the aliases not written: nothing more done, the reason passed on');
+        'Apply, classifying on, the aliases not written: nothing more done, the reason passed on');
     Backend::$answers = [];
     Backend::$asked = [];
     $result = (new ServiceController())->reconfigureAction();
-    check(Backend::$asked === ['appcontrol apply'] && $result['status'] === 'failed', 'Apply, no answer: failed, nothing more done');
+    check(Backend::$asked === ['appcontrol apply'] && $result['status'] === 'failed',
+        'Apply, classifying on, no answer: failed, nothing more done');
+    AppControl::$classify = '0';
+    Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'failed', 'errors' => ['refused']])];
+    Backend::$asked = [];
+    $result = (new ServiceController())->reconfigureAction();
+    check(Backend::$asked === ['appcontrol apply', 'appcontrol stop'] && $result['errors'] === ['refused'] &&
+        $result['classify'] === false, 'Apply, classifying off, the aliases not written: the classifier stopped all the same, ' .
+        'the reason passed on');
+    Backend::$answers = [];
+    Backend::$asked = [];
+    $result = (new ServiceController())->reconfigureAction();
+    check(Backend::$asked === ['appcontrol apply', 'appcontrol stop'] && $result['status'] === 'failed',
+        'Apply, classifying off, no answer: failed, the classifier stopped all the same');
 
     echo $failed ? "$failed of $checks checks failed\n" : "$checks checks passed\n";
     exit($failed ? 1 : 0);
