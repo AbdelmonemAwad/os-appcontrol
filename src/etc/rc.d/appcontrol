@@ -1,0 +1,123 @@
+#!/bin/sh
+# Copyright (C) 2026 Abdelmonem Awad <eg2@live.com>. BSD 2-Clause License.
+
+# PROVIDE: appcontrol
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+#
+# Application Control's classifier: classify.py run, supervised by daemon(8), which starts it again
+# ten seconds after it ends unasked. It reads the traffic through tcpdump -p and stands in no
+# connection's way, so starting or stopping it changes no traffic.
+#
+# Whether it runs is config.xml's setting, classify - on by default - read by
+# plugins.inc.d/appcontrol.inc at boot and by the page's Apply. configd calls this script with the
+# "one" prefix, so rc.conf's switch is not asked: one place decides, not two that can disagree.
+#
+# rc.subr is given no pidfile and no procname: the process daemon(8) runs is python, and a procname
+# would match a sibling plugin's python too. What is running is read from the two pidfiles here,
+# and believed only when the process behind each is ours.
+
+. /etc/rc.subr
+
+name="appcontrol"
+rcvar=appcontrol_enable
+
+load_rc_config $name
+
+: ${appcontrol_enable:="NO"}
+
+appcontrol_script="/usr/local/opnsense/scripts/appcontrol/classify.py"
+appcontrol_pid="/var/run/appcontrol.pid"
+appcontrol_super="/var/run/appcontrol.daemon.pid"
+
+start_cmd="appcontrol_start"
+stop_cmd="appcontrol_stop"
+status_cmd="appcontrol_status"
+
+# The pid in the file $1 when it is alive and is ours - the classifier, or daemon(8) supervising it.
+# daemon(8) writes a pid with no newline, so read's status is not asked: the value decides.
+appcontrol_pidof()
+{
+	local _pid _junk
+
+	[ -s "$1" ] || return 0
+	read _pid _junk < "$1" 2> /dev/null
+	case "${_pid}" in
+	''|*[!0-9]*)	return 0 ;;
+	esac
+	[ "${_pid}" -gt 1 ] 2> /dev/null || return 0
+	kill -0 "${_pid}" 2> /dev/null || return 0
+	case "$(ps -ww -o args= -p "${_pid}" 2> /dev/null)" in
+	*"${appcontrol_script} run"*|"daemon: ${name}["*)	echo "${_pid}" ;;
+	esac
+	return 0
+}
+
+appcontrol_start()
+{
+	local _pid
+
+	_pid=$(appcontrol_pidof "${appcontrol_super}")
+	[ -n "${_pid}" ] || _pid=$(appcontrol_pidof "${appcontrol_pid}")
+	if [ -n "${_pid}" ]; then
+		echo "${name} is already running as pid ${_pid}."
+		return 0
+	fi
+	if [ ! -x "${appcontrol_script}" ]; then
+		warn "${name}: ${appcontrol_script} is missing"
+		return 1
+	fi
+	install -d -o root -g wheel -m 0750 /var/db/os-appcontrol || return 1
+	echo "Starting ${name}."
+	/usr/sbin/daemon -f -R 10 -t "${name}" -P "${appcontrol_super}" -p "${appcontrol_pid}" \
+	    "${appcontrol_script}" run
+}
+
+appcontrol_stop()
+{
+	local _super _pid _left _waited _p
+
+	_super=$(appcontrol_pidof "${appcontrol_super}")
+	_pid=$(appcontrol_pidof "${appcontrol_pid}")
+	if [ -z "${_super}${_pid}" ]; then
+		echo "${name} is not running."
+		return 0
+	fi
+	echo "Stopping ${name}."
+	# daemon(8) passes SIGTERM on to the classifier, which stops its captures and ends
+	kill -TERM ${_super:-${_pid}} 2> /dev/null
+	_waited=0
+	while :; do
+		_left=
+		for _p in ${_super} ${_pid}; do
+			kill -0 "${_p}" 2> /dev/null && _left="${_left} ${_p}"
+		done
+		[ -n "${_left}" ] || break
+		if [ ${_waited} -ge 50 ]; then
+			warn "${name}: pid${_left} would not stop within 10 seconds"
+			kill -KILL ${_left} 2> /dev/null
+			break
+		fi
+		sleep 0.2
+		_waited=$((_waited + 1))
+	done
+	rm -f "${appcontrol_pid}" "${appcontrol_super}"
+	return 0
+}
+
+# OPNsense reads this line, looking for "not running" before "is running".
+appcontrol_status()
+{
+	local _pid
+
+	_pid=$(appcontrol_pidof "${appcontrol_pid}")
+	if [ -n "${_pid}" ]; then
+		echo "${name} is running as pid ${_pid}."
+		return 0
+	fi
+	echo "${name} is not running."
+	return 1
+}
+
+run_rc_command "$1"
