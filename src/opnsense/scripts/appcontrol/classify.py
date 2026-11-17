@@ -478,63 +478,115 @@ class Capture:
 
 
 class Job:
-    """One window's ndpiReader runs, started and not waited for, so the captures are read meanwhile."""
+    """One window's ndpiReader runs, started and not waited for, so the captures are read meanwhile: one
+    interface's file at a time, its two runs together - never more than two ndpiReader at once - and the
+    file and its CSVs removed once read, so the work directory holds one interface's at a time.
+
+    An interface whose file could not be written, or one of whose runs could not start, ended with an
+    error, wrote no CSV or was stopped at TIMEOUT, is not judged: its connections are counted as not
+    judged - none called unknown, none put in a table - and the reason is a problem of the window's."""
 
     def __init__(self, index, parts, reader, work):
         self.index = index
+        self.reader = reader
+        self.started = time.monotonic()      # the clock of the window's time may step; this one does not
         self.parts = []
-        self.started = time.time()
         for key, header, win in parts:
             base = os.path.join(work, '%d-%s' % (index, key))
-            pcap = base + '.pcap'
-            capture.pcap_file(pcap, header, win.records)
-            procs = []
-            for guess, csv in ((True, base + '.any.csv'), (False, base + '.dpi.csv')):
-                try:
-                    procs.append(subprocess.Popen(ndpi.command(pcap, csv, guess, reader), stdin=subprocess.DEVNULL,
-                                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-                except OSError:
-                    procs.append(None)
-            self.parts.append({'key': key, 'win': win, 'pcap': pcap, 'csv': (base + '.any.csv', base + '.dpi.csv'),
-                               'procs': procs})
+            self.parts.append({'key': key, 'win': win, 'header': header, 'pcap': base + '.pcap',
+                               'csv': (base + '.any.csv', base + '.dpi.csv'), 'procs': None, 'rows': None,
+                               'problem': None, 'notes': []})
+        self.at = 0
+        self.unread = 0                      # connections of windows with no file to give ndpiReader
+        self.poll()
 
-    def done(self):
-        return all(p is None or p.poll() is not None for part in self.parts for p in part['procs'])
+    def _begin(self, part):
+        part['procs'] = [None, None]
+        try:
+            capture.pcap_file(part['pcap'], part['header'], part['win'].records)
+        except OSError as error:
+            part['problem'] = 'the window\'s file for %s could not be written: %s' % (part['key'], error)
+            return
+        for i, guess in ((0, True), (1, False)):
+            try:
+                part['procs'][i] = subprocess.Popen(ndpi.command(part['pcap'], part['csv'][i], guess, self.reader),
+                                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                    stderr=subprocess.DEVNULL)
+            except OSError as error:
+                part['problem'] = part['problem'] or 'ndpiReader could not be run on %s: %s' % (part['key'], error)
+
+    def _finish(self, part):
+        """Its runs over: its two CSVs read when both ran well, then its files removed."""
+        for proc in part['procs'] or ():
+            if part['problem'] is None and proc is not None and proc.returncode != 0:
+                part['problem'] = 'ndpiReader ended with status %d on %s' % (proc.returncode, part['key'])
+        if part['problem'] is None:
+            rows = []
+            for csv in part['csv']:
+                if not ndpi.wrote_csv(csv):
+                    part['problem'] = 'ndpiReader wrote no CSV on %s' % part['key']
+                    break
+                found, bad = ndpi.read_csv(csv)
+                if bad:
+                    part['notes'].append('%d line(s) of ndpiReader\'s CSV not read on %s' % (bad, part['key']))
+                rows.append(found)
+            else:
+                part['rows'] = rows
+        self._remove(part)
+
+    def poll(self):
+        """The runs moved on - each interface's begun once the one before has finished; True once all are over."""
+        while self.at < len(self.parts):
+            part = self.parts[self.at]
+            if part['procs'] is None:
+                self._begin(part)
+            if any(p is not None and p.poll() is None for p in part['procs']):
+                return False
+            self._finish(part)
+            self.at += 1
+        return True
 
     def kill(self):
-        for part in self.parts:
-            for p in part['procs']:
-                if p is not None and p.poll() is None:
-                    p.kill()
-                    p.wait()
+        """At TIMEOUT: the runs going stopped, those not begun never begun - their interfaces not judged."""
+        for part in self.parts[self.at:]:
+            for proc in part['procs'] or ():
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                    part['problem'] = part['problem'] or 'ndpiReader stopped after %d s on %s' % (ndpi.TIMEOUT, part['key'])
+            if part['procs'] is None:
+                part['problem'] = 'ndpiReader not run on %s: the window ran out of its %d s' % (part['key'], ndpi.TIMEOUT)
+            self._finish(part)
+        self.at = len(self.parts)
 
     def results(self):
-        """({key: flow} begun in the window, rows named with guessing on, rows named by DPI, problems)."""
-        flows, rows_any, rows_dpi, problems = {}, {}, {}, []
+        """({key: flow} begun in the window on the interfaces judged, rows named with guessing on, rows
+        named by DPI, problems, connections not judged as their interface's runs did not go well)."""
+        flows, rows_any, rows_dpi, problems, skipped = {}, {}, {}, [], self.unread
         for part in self.parts:
+            problems.extend(part['notes'])
+            if part['rows'] is None:
+                problems.append(part['problem'] or 'ndpiReader did not run on %s' % part['key'])
+                skipped += len(part['win'].flows)
+                continue
             for flow in part['win'].flows:
                 flows.setdefault(flow.key, flow)
-            for i, rows in ((0, rows_any), (1, rows_dpi)):
-                proc = part['procs'][i]
-                if proc is None:
-                    problems.append('ndpiReader could not be run')
-                    continue
-                if proc.returncode not in (0, None):
-                    problems.append('ndpiReader ended with status %d on %s' % (proc.returncode, part['key']))
-                found, bad = ndpi.read_csv(part['csv'][i])
-                if bad:
-                    problems.append('%d line(s) of ndpiReader\'s CSV not read on %s' % (bad, part['key']))
+            for found, rows in zip(part['rows'], (rows_any, rows_dpi)):
                 for key, row in found.items():
                     rows.setdefault(key, row)
-        return flows, rows_any, rows_dpi, problems
+        return flows, rows_any, rows_dpi, problems, skipped
+
+    @staticmethod
+    def _remove(part):
+        for path in (part['pcap'],) + part['csv']:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def remove(self):
         for part in self.parts:
-            for path in (part['pcap'],) + part['csv']:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            self._remove(part)
 
 
 def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
@@ -624,30 +676,36 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                     state.fail(c.error, t)
         due = int((t - GRACE) // WINDOW) - 1
         if job is None and next_close <= due:
-            parts = []
+            parts, unread_flows = [], 0
             for c in captures:
                 win = c.flows.close(next_close)
                 if win.capped:
                     state.capped += 1
                 if win.records and c.stream.header:
                     parts.append((c.key, c.stream.header, win))
+                else:
+                    unread_flows += len(win.flows)
                 c.flows.forget(t)
             look(t)
             job = Job(next_close, parts, reader, work)
+            job.unread = unread_flows
             next_close += 1
-        if job is not None and (job.done() or now() - job.started > ndpi.TIMEOUT):
-            if not job.done():
-                job.kill()
-                state.fail('ndpiReader took longer than %d s on window %d' % (ndpi.TIMEOUT, job.index))
-            flows, rows_any, rows_dpi, problems = job.results()
+        over = job is not None and job.poll()
+        if job is not None and not over and time.monotonic() - job.started > ndpi.TIMEOUT:
+            job.kill()
+            state.fail('ndpiReader took longer than %d s on window %d' % (ndpi.TIMEOUT, job.index))
+            over = True
+        if over:
+            flows, rows_any, rows_dpi, problems, skipped = job.results()
             records, not_judged = judge(flows, rows_any, rows_dpi)
+            not_judged += skipped
             aliases = tables.present(config)
             counts = apply(state, records, pf, aliases, now())
             state.totals['not_judged'] += not_judged
             counts['not_judged'] = not_judged
             counts['window'] = job.index
             counts['at'] = now()
-            counts['seconds'] = round(now() - job.started, 3)
+            counts['seconds'] = round(time.monotonic() - job.started, 3)
             state.last = counts
             state.windows += 1
             for problem in problems + pf.errors:

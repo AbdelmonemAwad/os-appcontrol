@@ -23,6 +23,7 @@ import stat
 import struct
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -778,6 +779,138 @@ with tempfile.TemporaryDirectory() as tmp:
     check('the service: tcpdump stopped with it, and the service said when', (alive, saved['stopped'] is not None),
           (False, True))
     check('the service: two windows of 2 s and 1 s of grace took well under 20 s', took < 20, True)
+
+
+# ------------------------------------------------------------- a window's ndpiReader runs, one interface at a time
+def windows_of(keys):
+    """{key: (header, window)}: one window on each interface key, a TLS connection begun in it."""
+    out = {}
+    for i, key in enumerate(keys):
+        stream, got = stream_of(pcapgen.tcp_connection(T0 + 1, '192.0.2.%d' % (20 + i), 50100 + i, '198.51.100.10', 443,
+                                                       hello))
+        fl = capture.Flows(key, 60, T0)
+        for ts, rec, wire in got:
+            fl.packet(stream.linktype, ts, rec, wire)
+        out[key] = (stream.header, fl.close(fl.window_of(T0 + 1)))
+    return out
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    work = os.path.join(tmp, 'work')
+    os.makedirs(work)
+    log_path = os.path.join(tmp, 'runs')
+    good = os.path.join(tmp, 'good.csv')
+    with open(good, 'w') as handle:
+        handle.write(csv_rows([((6, '192.0.2.20', 50100, '198.51.100.10', 443), 'TLS.YouTube', 'www.example.com')]))
+    # ndpiReader: says when it begins and ends and what the work directory holds; on opt1 the DPI run fails,
+    # on opt2 no CSV is written, on slow it does not end
+    program(os.path.join(tmp, 'ndpiReader'), '#!/usr/bin/env python3\nimport os, shutil, sys, time\n'
+            'a = sys.argv\npcap, csv = a[a.index("-i") + 1], a[a.index("-C") + 1]\nname = os.path.basename(pcap)\n'
+            'log = open(%r, "a")\nlog.write("begin %%s %%s %%r\\n" %% (name, "-d" in a, sorted(os.listdir(%r))))\nlog.flush()\n'
+            'if "slow" in name:\n    time.sleep(30)\n'
+            'time.sleep(0.3)\n'
+            'if "opt2" not in name:\n    shutil.copy(%r, csv)\n'
+            'log.write("end %%s %%s\\n" %% (name, "-d" in a))\n'
+            'sys.exit(3 if "opt1" in name and "-d" in a else 0)\n' % (log_path, work, good))
+    found = windows_of(['lan', 'opt1', 'opt2'])
+    job = classify.Job(7, [(k, h, w) for k, (h, w) in found.items()], os.path.join(tmp, 'ndpiReader'), work)
+    while not job.poll():
+        time.sleep(0.05)
+    flows, rows_any, rows_dpi, problems, skipped = job.results()
+    runs = open(log_path).read().splitlines()
+    at_once, most = 0, 0
+    for line in runs:
+        at_once += 1 if line.startswith('begin') else -1
+        most = max(most, at_once)
+    check('ndpiReader: one interface\'s file at a time, its two runs together - never more than two at once',
+          (most, [line.split()[1] for line in runs if line.startswith('begin')]),
+          (2, ['7-lan.pcap', '7-lan.pcap', '7-opt1.pcap', '7-opt1.pcap', '7-opt2.pcap', '7-opt2.pcap']))
+    listings = [line.split(' ', 3)[3] for line in runs if line.startswith('begin')]
+    check('ndpiReader: the work directory holds one interface\'s file when its runs begin',
+          [(listing.count('.pcap'), "'7-%s.pcap'" % k in listing) for k, listing in zip(('lan', 'lan', 'opt1', 'opt1', 'opt2', 'opt2'),
+                                                                                         listings)], [(1, True)] * 6)
+    check('ndpiReader failing on one interface, writing no CSV on another: their connections not judged, the reasons said',
+          (sorted(f.iface for f in flows.values()), len(rows_dpi), skipped, problems),
+          (['lan'], 1, 2, ['ndpiReader ended with status 3 on opt1', 'ndpiReader wrote no CSV on opt2']))
+    check('ndpiReader: every file removed once read', os.listdir(work), [])
+    found = windows_of(['slow', 'lan'])
+    job = classify.Job(8, [(k, h, w) for k, (h, w) in found.items()], os.path.join(tmp, 'ndpiReader'), work)
+    time.sleep(0.5)
+    still = job.poll()
+    job.kill()
+    flows, rows_any, rows_dpi, problems, skipped = job.results()
+    check('ndpiReader past its time: stopped, the next interface never run, neither judged, the files removed',
+          (still, flows, skipped, problems, os.listdir(work)),
+          (False, {}, 2, ['ndpiReader stopped after 120 s on slow', 'ndpiReader not run on lan: the window ran out of its 120 s'],
+           []))
+
+
+SERVICE_CONFIG = ('<opnsense><interfaces><lan><enable>1</enable><if>em1</if><ipaddr>192.0.2.1</ipaddr></lan>'
+                  '<wan><enable>1</enable><if>em0</if><ipaddr>dhcp</ipaddr></wan>%s</interfaces>'
+                  '<OPNsense><Firewall><Alias><aliases>' + ''.join(
+                      '<alias><enabled>1</enabled><name>%s</name><type>external</type><description>Application Control: %s'
+                      '</description></alias>' % (n, d) for n, d in (
+                          ('appcontrol_cat_Media', 'category Media'), ('appcontrol_cat_Web', 'category Web'),
+                          ('appcontrol_cat_Network', 'category Network'), ('appcontrol_YouTube', 'YouTube'))) +
+                  '</aliases></Alias></Firewall><AppControl><general><classify>1</classify><apps>YouTube</apps>'
+                  '</general></AppControl></OPNsense></opnsense>')
+COPY_READER = ('#!/usr/bin/env python3\nimport shutil, sys\nopen(%r, "a").write("ndpiReader " + " ".join(sys.argv[1:]) + "\\n")\n'
+               'a = sys.argv\nshutil.copy(%r if "-d" in a else %r, a[a.index("-C") + 1])\n')
+
+
+def service(tmp, packets, any_rows, dpi_rows, reader=COPY_READER, stop_after=1, cat=None, more_interfaces='',
+            timeout=40, **kwargs):
+    """One run of the service with stand-ins, in tmp: tcpdump writing what the Python in packets puts in p
+    (t its start, pcapgen there) and then waiting; ndpiReader (reader, %-formatted with the calls file and
+    the two CSVs) - COPY_READER copies the CSV of the run asked for; ifconfig and a stand-in pfctl. Stopped
+    after timeout s whatever happens. (state, status.json, unknown.json, the programs' calls, pfctl's tables)."""
+    calls = os.path.join(tmp, 'calls')
+    any_csv, dpi_csv = os.path.join(tmp, 'any.csv'), os.path.join(tmp, 'dpi.csv')
+    for path, pairs in ((any_csv, any_rows), (dpi_csv, dpi_rows)):
+        with open(path, 'w') as handle:
+            handle.write(csv_rows(pairs))
+    program(os.path.join(tmp, 'ndpiReader'), reader % (calls, dpi_csv, any_csv) if '%r' in reader else reader)
+    program(os.path.join(tmp, 'tcpdump'), '#!/usr/bin/env python3\nimport os, sys, time\nsys.path.insert(0, %r)\n'
+            'import pcapgen\nopen(%r, "a").write("tcpdump " + " ".join(sys.argv[1:]) + "\\n")\n'
+            't = time.time()\nhello = pcapgen.client_hello(padding=1700)\np = []\n%s\n'
+            'sys.stdout.buffer.write(pcapgen.capture(p))\nsys.stdout.buffer.flush()\n'
+            'while True:\n    time.sleep(1)\n' % (HERE, calls, packets))
+    with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
+        handle.write(IFCONFIG_TEXT)
+    program(os.path.join(tmp, 'ifconfig'), '#!/bin/sh\necho "ifconfig $*" >> %s\ncat %s\n' % (calls, os.path.join(tmp, 'ifconfig.txt')))
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write(SERVICE_CONFIG % more_interfaces)
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump(cat or catalogue, handle)
+    fake = FakePf()
+    timer = threading.Timer(timeout, lambda: setattr(classify, 'running', False))
+    timer.start()
+    try:
+        state = classify.serve(stop_after=stop_after, reader=os.path.join(tmp, 'ndpiReader'), tcpdump=os.path.join(tmp, 'tcpdump'),
+                               pf=tables.Pf(run=fake), config=config, catalogue_path=os.path.join(tmp, 'ndpi.json'),
+                               status=os.path.join(tmp, 'status.json'), unknown=os.path.join(tmp, 'unknown.json'),
+                               work=os.path.join(tmp, 'work'), refresh=False, ifconfig=os.path.join(tmp, 'ifconfig'), **kwargs)
+    finally:
+        timer.cancel()
+        classify.running = True
+    asked = open(calls).read().splitlines() if os.path.exists(calls) else []
+    return (state, json.load(open(os.path.join(tmp, 'status.json'))), json.load(open(os.path.join(tmp, 'unknown.json'))),
+            asked, {t: sorted(a) for t, a in fake.held.items()})
+
+
+TWO = ('p += pcapgen.tcp_connection(t, "192.0.2.10", 50001, "198.51.100.10", 443, hello)\n'
+       'p += pcapgen.tcp_connection(t, "192.0.2.10", 50004, "203.0.113.5", 5201, data=b"z" * 300)')
+YOUTUBE = [((6, '192.0.2.10', 50001, '198.51.100.10', 443), 'TLS.YouTube', 'www.example.com')]
+
+with tempfile.TemporaryDirectory() as tmp:
+    failing = ('#!/bin/sh\ncase "$*" in *" -d"*) exit 1 ;; esac\n'
+               'while [ $# -gt 0 ]; do [ "$1" = -C ] && cp %s "$2"; shift; done\n' % os.path.join(tmp, 'any.csv'))
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, reader=failing)
+    check('the service, ndpiReader failing on the interface: its connections counted as not judged - none unknown, none '
+          'named, no table', ({k: saved['totals'][k] for k in ('named', 'unknown', 'not_judged')}, rows, held,
+                              saved['error']['message']),
+          ({'named': 0, 'unknown': 0, 'not_judged': 2}, [], {}, 'ndpiReader ended with status 1 on lan'))
 
 # --------------------------------------------------------------------------- what the page reads
 import status                                                            # noqa: E402

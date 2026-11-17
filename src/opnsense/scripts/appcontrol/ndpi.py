@@ -58,6 +58,16 @@ def canonical(text):
         return text.strip()
 
 
+def wrote_csv(path):
+    """True when ndpiReader wrote its CSV: the file is there and begins with its header, which comes
+    before any row - a run that ended early wrote none."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            return handle.readline().startswith('#')
+    except OSError:
+        return False
+
+
 def read_csv(path):
     """{key: row} of ndpiReader's CSV, the key the connection's two ends (capture.flow_key) and the row
     {'proto', 'src', 'sport', 'dst', 'dport', 'name', 'by_ip', 'server_name', 'packets'}; the rows and
