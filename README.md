@@ -43,12 +43,20 @@ one page:
   Settings' "Cut open connections when listed". An address leaves its table once it has not been seen
   for the alias's Expire - 3600 s by default - carried out by OPNsense's own cron; seen again, its time
   starts again;
+- **never in a table** - the firewall's own addresses and its LAN's - any address on the networks of
+  its internal interfaces, and of those watched - read from `ifconfig -a` at each window's close; an
+  address that is no server's - multicast, broadcast, link-local, loopback, unspecified; and the other
+  end of an ICMP connection. Such a connection is counted as named, and status.json says why it went
+  into no table;
 - **guesses** - a connection nDPI names only by its port or its address is shown as a guess and put in
   no table;
 - **Unknown** - the connections nDPI could not name, the guesses, and those it named by their protocol
   alone - TLS, QUIC or HTTP with no application on top - each listed with its server, and the server
-  name and JA4 fingerprint its client sent first, so its source can be found. The latest 500 are kept;
-- **the cards** - applications named, connections classified, unknown, and the last error.
+  name and JA4 fingerprint its client sent first, so its source can be found. One not named, or named
+  by its protocol alone, is listed only when its beginning was seen. The latest 500 of each kind are
+  kept;
+- **the cards** - applications named, connections classified, unknown, and the last error, with what
+  reading the installed nDPI's catalogue found wrong; under them, the windows cut short at a limit.
 
 Off, the classifier stops and the plugin's aliases leave Firewall: Aliases - switched off instead where a
 rule or a setting still names one.
@@ -59,24 +67,44 @@ The design is phase 0's, settled on 2026-11-17 by the plan, the new-plugin stand
 itself on a lab XGS 3300 and XGS 136 - nDPI's runs, not this plugin's:
 
 - **read, never in the way** - on each internal interface (one with an address of its own and no
-  gateway, unless Settings names others), `tcpdump -p` copies what the host sees through BPF to the
-  service's pipe. `-p` leaves the port as it is: on an XGS 136 a front port made promiscuous is a
-  request to the switch's agent, and `ndpiReader` reading a port itself always makes it promiscuous;
+  gateway - its own, or one in System: Gateways - unless Settings names others), `tcpdump -p` copies
+  what the host sees through BPF to the service's pipe. `-p` leaves the port as it is: on an XGS 136 a
+  front port made promiscuous is a request to the switch's agent, and `ndpiReader` reading a port
+  itself always makes it promiscuous. The interfaces are read again at each window's close, so one
+  assigned or switched on since is followed. A capture that stops - its device gone - is started again
+  after 30 seconds, the wait doubled each time it stops again up to 10 minutes, and said when it stops
+  and when it reads again;
 - **a connection's first packets** - the service keeps the first 16 packets of each connection, both
   ways, in the window of 60 seconds it began in; 10 seconds after a window ends, its packets go to
-  `ndpiReader` as a small file. nDPI stops looking at a connection after its first 8 packets here
+  `ndpiReader` as a small file, on a tmpfs the rc script mounts at the start and takes down at the
+  stop: never on the disk (160 MiB at most, memory only for what is in it; without it the classifier
+  writes nothing, and says why). nDPI stops looking at a connection after its first 8 packets here
   (`--cfg=NULL,packets_limit_per_flow,8`), which was enough for every connection of phase 0's lab. A
   connection is never cut in two by a window's end; what it sends after its first 16 packets is
-  counted, not kept;
+  counted, not kept. A window keeps at most 32 MiB an interface, checked before each packet: past it,
+  a connection keeps nothing more, and is judged only if nDPI names it from what it kept. A SYN on two
+  ends already followed begins a new connection once the old one ended or its window closed;
 - **twice, once without guessing** - `ndpiReader -C` writes a row for each connection it names, and
-  leaves out those it cannot (phase 0's lab). It is run once as it is and once with `-d`, its own
-  "use only DPI": a connection named only in the first run was named by a guess;
+  leaves out those it cannot: that is from nDPI's source (de5c784), not measured - without `-v` it
+  writes only the flows that have a protocol, and reads a file to its end without purging any flow;
+  phase 0's lab had no connection nDPI could not name. It is run once as it is and once with `-d`, its
+  own "use only DPI": a connection named only in the first run was named by a guess. One interface's
+  file at a time, its two runs together - never more than two `ndpiReader` at once - and the file and
+  its CSVs removed once read. A run that cannot start, fails, writes no CSV or is still going at 120
+  seconds leaves that interface's connections of the window not judged: none called unknown, none put
+  in a table;
 - **the server** - the end a connection's SYN went to, or, with no SYN, the end its first packet went
-  to. A connection whose beginning was not seen - open before the service started - is not called
-  unknown, and its server goes into no table;
+  to. A connection whose beginning was not seen - open before the service started, or, without a SYN,
+  heard from again after it was forgotten as idle - is not called unknown, and its server goes into no
+  table;
 - **its category** - the category nDPI's table of protocols (`ndpiReader -H`) gives its application, or
   its protocol when it has no application on top. The categories and the applications are those of
-  the installed nDPI (`ndpiReader -a 1` and `-H`), read again each time the service starts;
+  the installed nDPI (`ndpiReader -a 1` and `-H`), read again each time the service starts. A table in
+  which TLS is not in Web, or DNS not in Network, was not read as nDPI writes it: that is said, on the
+  page too, and no category is taken from it, while the applications chosen in Settings fill their
+  tables still;
+- **a clock that steps** - back, or forward past windows not yet closed: the windows still open are
+  dropped, counted in status.json, and the windows begin again with the one now;
 - **JA4 and the server name** - read by the service from the client's first segments, put together:
   the ClientHello's server name, its first ALPN and its JA4 fingerprint as FoxIO's specification
   defines it. JA4 is read from TLS over TCP only; QUIC's ClientHello is encrypted, and for QUIC the
@@ -89,75 +117,111 @@ into hardware on its own schedule, and the service classifies what the host saw 
 
 - **anything on an appliance** - this branch was built and tested away from one (below). Not run yet:
   on the second XGS 3300, the XGS 136, a plain OPNsense; the page in a browser; `install.sh` and
-  `uninstall.sh` on a firewall; the classifier's cost on a host's processors, its tables filling, an
-  address expiring.
+  `uninstall.sh` on a firewall; the tmpfs mounted by FreeBSD's own `mount`; the classifier's cost on a
+  host's processors and memory, its tables filling, an address expiring.
 - **`ndpiReader -H` and `-a 1` read on a box** - their format here is the source's (nDPI's commit
   de5c784, the package's): `ndpi_dump_protocols()` and `ndpi_generate_options()`. Phase 0 ran both
   options on an XGS 3300 but did not keep their output. If `-a 1` gives nothing, `categories.json`,
   nDPI's categories as that commit names them, stands in; `apps.py check` says how the two differ.
 - **a category given by a host name** - nDPI can give a connection a category of its own from its host
   list; the table here is its application's category from `-H`. How often the two differ is not
-  measured.
+  measured. Each connection's own category, which `ndpiReader -K json` gives, is phase 2's.
+- **category 32** - categories.json and the page's map leave out nDPI's category 32. The installed
+  nDPI's `-a 1` names it all the same, so its table is made at runtime, under nDPI's English name, which
+  the page shows untranslated; and when categories.json stands in for `-a 1`, that category's protocols
+  drop out of the protocol map - offered in no Settings list, their servers in no category table.
+- **bytes per application** - counted from pf's states: the research left it on the lab's L4, and it is
+  not built.
 - **blocking, and the cut in hardware** - phase 2 of the plan: a block rule the plugin registers, and
   the connections open to a blocked application cut, on a Sophos XGS in the coprocessor too.
 - **Suricata rules, routing by gateway** - phases 3 and 4.
-- **at line rate** - the service reads at most 2,000,000 packets an interface in a window; the rest of
-  that window waits, and status.json counts the windows cut short - the page does not show it yet.
-  Neither the cost nor the rate it holds is measured.
+- **at line rate** - the service reads at most 2,000,000 packets an interface in a window - the rest
+  waits - and follows at most 100,000 connections begun in one window, keeping 32 MiB of their packets;
+  the page says how many windows were cut short. Neither the cost nor the rate it holds is measured.
 
 ## What is tested
 
 On 2026-11-17, from this branch, away from an appliance - the checks, run under Python 3.14 and PHP 8.5:
 
-- **the classifier** - `tools/test-classify.py`, 111 checks:
+- **the classifier** - `tools/test-classify.py`, 156 checks:
   - ndpiReader's CSV as phase 0's lab read it on an XGS 3300 with ndpi-6.0.d20260909,1
     (`tools/fixtures/lab-*.csv`, every address made a documentation one): the connections and names
     the lab counted - TLS.Wikipedia, TLS.Cloudflare and TLS.Mozilla 11 each and DNS 8, TLS.YouTube 12
     and TLS.Twitch 12, HTTP.Canonical 20, SMTP 5 - and a file of the header alone giving none;
   - the catalogue: categories and protocols from `-a 1` and `-H` in the source's format, and
-    `categories.json` in their stead;
+    `categories.json` in their stead; a table of protocols in which TLS is not in Web or DNS not in
+    Network said by `apps.py refresh`, and taken for no category by the service;
   - the alias names: at most 31 characters, `_` for any other character, a long one cut with a suffix
     of its own, every category's name its own;
   - the capture, on packets built byte by byte: the pcap stream in chunks, a connection's server, the
     ClientHello put together from two segments, in order or not, and the JA4 of FoxIO's own example,
     `t13d1516h2_8daaf6152771_e5627efa2ab1`; IPv6 behind a VLAN tag and an extension header; padding,
     fragments, tunnels; the first 16 packets of a connection kept in its window and the rest counted;
+    a window's bytes checked before each packet, and a connection cut short by them not called
+    unknown; a ClientHello's pieces let go at the 16th packet and at the window's close; a SYN on ends
+    used before beginning a new connection once the old one ended or its window closed, and not while
+    it is open; a UDP connection heard from again after it went idle not taken as begun, and one an
+    hour later taken as begun;
   - each connection named, guessed or unknown, and what goes into which table: a guess, an unknown
     connection, one open before the start and a row no capture matched never do; an address new to a
-    table added, one there refreshed; the Unknown list kept to its latest 500;
+    table added, one there refreshed; the Unknown list kept to its latest 500 of each kind, and a
+    protocol named alone listed only for a connection begun here;
+  - never in a table: `ifconfig -a` as FreeBSD writes it - netmasks in hex, `/25`, `prefixlen`, a CARP
+    address, a point-to-point link - read for the firewall's own addresses and its internal networks;
+    ICMP and ICMPv6, multicast, broadcast, link-local, loopback and unspecified addresses, the firewall
+    and a LAN host kept out and counted with the reason, a server out there or on the WAN's network
+    put in, and nothing put in while the addresses are not read;
   - the interfaces read by default: the internal ones - not the WAN, static or not, nor one with a
-    gateway or an address from upstream;
-  - a packet the reader cannot make sense of counted, and the capture going on;
-  - one run of the service with stand-in `tcpdump` and `ndpiReader` programs and a stand-in `pfctl`:
-    `tcpdump -p -U`, ndpiReader twice, the tables, status.json and unknown.json, its files removed and
-    tcpdump stopped when it ends; and nDPI missing, said;
+    gateway, its own or one of System: Gateways, or an address from upstream;
+  - a packet the reader cannot make sense of counted, and the capture going on; a capture that stops
+    again and again started after 30 s, the wait doubled to 10 minutes, said once, and said again
+    when it reads again;
+  - ndpiReader: one interface's file at a time, never more than two runs at once, each file gone once
+    read; a run that fails, one that writes no CSV and one still going at its time - and the interface
+    after it, never run - each leaving its connections not judged;
+  - one run of the service with stand-in `tcpdump`, `ndpiReader`, `ifconfig` and `mount` programs and a
+    stand-in `pfctl`: `tcpdump -p -U`, ndpiReader twice, the tables, status.json and unknown.json, the
+    firewall's addresses read at the start and at each window's close, its files removed and tcpdump
+    stopped when it ends; and runs of it with ndpiReader failing, nDPI's protocols not to be believed,
+    the clock set 1000 s forward and 1000 s back, an interface switched off and another assigned while
+    it runs, no interface until one is switched on, the work directory not in memory, and nDPI
+    missing;
   - `status.py`: each application with its table and the addresses pf holds there, the category
-    tables, and a pidfile believed only when its process is the classifier;
-- **the aliases** - `tools/test-aliases.php`, 17 checks, with stand-ins for OPNsense's Alias model: an
-  External alias with Expire made for each table, its Expire refreshed, nothing written when nothing
-  changed, the owner's alias of the same name left; on removal every alias of the plugin's taken out,
-  switched off instead where a rule or XGS: Settings still names it; `aliases.php` saving only after a
-  clean validation, and touching nothing when the names cannot be read or `tables.py` fails;
-- **the page's API** - `tools/test-mvc.php`, 15 checks, with stand-ins for OPNsense's MVC base: the
+    tables, what reading the catalogue found wrong and when, and a pidfile believed only when its
+    process is the classifier;
+- **the aliases** - `tools/test-aliases.php`, 21 checks, with stand-ins for OPNsense's Alias model whose
+  validation is the model's own for the fields written (OPNsense 26.7's `Alias.xml`,
+  `AliasNameField.php` and `DescriptionField.php`): every alias the plugin would make for nDPI's 93
+  categories and the applications of `-H` taken, and a name, a type, an Expire or a description the
+  model refuses refused; an External alias with Expire made for each table, its Expire refreshed,
+  nothing written when nothing changed, the owner's alias of the same name left; on removal every alias
+  of the plugin's taken out, switched off instead where a rule or XGS: Settings still names it;
+  `aliases.php` saving only after a clean validation, and touching nothing when the names cannot be
+  read, `tables.py` fails or the model refuses a name;
+- **the page's API** - `tools/test-mvc.php`, 17 checks, with stand-ins for OPNsense's MVC base: the
   status passed on and an answer it cannot read said, the grids' rows, and Apply's order - the aliases,
   the filter, cron, the tables of aliases gone, the classifier started again or stopped when off -
-  with nothing done after aliases not written, nor for a GET;
-- **the installation** - `tools/test-install.py`, 31 checks: `install/install.sh`,
+  with nothing done after aliases not written but the classifier stopped when off, and nothing for a
+  GET;
+- **the installation** - `tools/test-install.py`, 37 checks: `install/install.sh`,
   `install/uninstall.sh`, the package's `post-install.sh`, `pre-deinstall.sh` and `post-deinstall.sh`,
-  and `place-menu.sh`, in a temporary root with stand-ins for `service`, `configctl`, `pkg`, `pfctl` and
-  `pkill`: every file laid down with its mode and taken away, the menu in XGS (59) or Firewall, nothing
-  copied when a file has a syntax error, the package `ndpi` installed when missing and removed only when
-  the installer installed it and nothing needs it, the classifier started on by default or stopped when
-  off, the classifier stopped and the aliases taken out before the files go, the tables of aliases gone
-  emptied, and nothing done by the old package in an upgrade;
+  `place-menu.sh` and the rc script, in a temporary root with stand-ins for `service`, `configctl`,
+  `pkg`, `pfctl`, `pkill`, `mount`, `umount`, `daemon` and `rc.subr`: every file laid down with its mode
+  and taken away, the menu in XGS (59) or Firewall, nothing copied when a file has a syntax error, the
+  package `ndpi` installed when missing and removed only when the installer installed it and nothing
+  needs it, the classifier started on by default or stopped when off, the tmpfs of the window files
+  mounted at its start - once - and taken down at its stop, running or not, and by every removal, the
+  classifier stopped and the aliases taken out before the files go, the tables of aliases gone emptied,
+  and nothing done by the old package in an upgrade;
 - **the self-update** - `tools/test-self-update.py`, 45 checks, as os-blocklists has it;
-- **the strings** - `tools/check-strings.py`: each of the 155 strings the GUI shows is in `source.json`,
+- **the strings** - `tools/check-strings.py`: each of the 156 strings the GUI shows is in `source.json`,
   nDPI's 93 category names among them through the page's map (`tools/gen-data-strings.py`); 38 had
-  their Arabic in opnsense-arabic that day, and the other 117 wait for it;
+  their Arabic in opnsense-arabic that day, and the other 118 wait for it;
 - **the rest of the checks** - every installed file removed by the uninstaller
   (`tools/check-uninstall.sh`), `php -l`, `py_compile` and pyflakes, `sh -n`, XML and JSON, nothing
   private, no Arabic in the code, the copyright line; and, by hand, the page kit and the page's script
-  run once under node with a stand-in jQuery.
+  run under node with a stand-in jQuery - the Last error card with the catalogue's errors, and the line
+  of windows cut short shown and hidden.
 
 64 behaviours those tests cover were taken out in turn, on a copy, and the tests failed on each:
 among them a guess judged as named, a connection open before the start put in a table, the WAN read
@@ -166,7 +230,12 @@ the JA4's sorting, GREASE and supported_versions, an address seen again added in
 an alias made without Expire, one a rule names removed, Apply going on after the aliases failed, the
 aliases taken out after the files, and `ndpi` removed though another package needs it. A first run
 had found 7 of them untested: the tests reach 6 now, and the seventh changed nothing - a row with a
-"|" in its last column is read either way.
+"|" in its last column is read either way. After the review of that day, each of its fixes was undone
+in turn the same way - 68 changes, among them the byte cap checked only when a connection begins, the
+firewall, a LAN host or ICMP put in a table, a failed ndpiReader's connections called unknown, every
+interface's runs begun at once, a clock step not seen, the interfaces read once, the window files
+written outside memory, a protocol table not believed used all the same, Apply leaving the classifier
+running when off and an alias the model refuses saved - and the tests failed on each.
 
 Not tested: anything on an appliance (above).
 
@@ -188,9 +257,10 @@ reloads the filter and cron, starts the classifier, and records the commit for t
 run again: the settings in config.xml are kept.
 
 `sh install/uninstall.sh` stops the classifier, takes the plugin's aliases out of Firewall: Aliases
-(switched off instead where a rule or a setting still names one), removes its files and its state,
-empties the tables of the aliases gone, and removes the package `ndpi` only when `install.sh`
-installed it and no other package needs it. The settings stay in config.xml.
+(switched off instead where a rule or a setting still names one), takes down the tmpfs of its window
+files, removes its files and its state, empties the tables of the aliases gone, and removes the
+package `ndpi` only when `install.sh` installed it and no other package needs it. The settings stay in
+config.xml.
 
 **From a package**, once there is a release: `tools/make-package.sh` builds it on a firewall, and
 `release.yml` in a FreeBSD virtual machine for each release, as os-blocklists does. The package

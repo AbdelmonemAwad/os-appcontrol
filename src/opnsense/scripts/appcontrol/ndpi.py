@@ -12,10 +12,13 @@ A window's packets are given to ndpiReader twice, as a file (classify.py writes 
 
 The CSV holds one row a connection nDPI named, "|" between the columns, the first line its header
 (#flow_id|protocol|first_seen|...|ndpi_proto|...|server_name_sni|...); a connection nDPI could not
-name is left out (measured on OPNsense 26.7.9 with ndpi-6.0.d20260909,1, phase 0). -d is ndpiReader's
-"Disable protocol guess (by ip and by port) and use only DPI" (its own help on that package), so a
-connection named in the first run and not in the second was named by a guess, by its port or its
-address - shown as a guess and never put in a table (the plan's settled point 4).
+name is left out. That is from nDPI's source (de5c784, the package's commit), not measured: without -v,
+printFlowsStats() writes the flows node_print_known_proto_walker() walks, those with a protocol, and a
+file is read to its end with no flow purged as idle (live captures alone are). Phase 0's lab had no
+connection nDPI could not name. -d is ndpiReader's "Disable protocol guess (by ip and by port) and use
+only DPI" (its own help on that package), so a connection named in the first run and not in the second
+was named by a guess, by its port or its address - shown as a guess and never put in a table (the
+plan's settled point 4).
 
 The catalogue of the installed nDPI is read from two more of its options: -a 1, "List known
 categories", and -H, its help with the table of the protocols it knows - name, breed, category and
