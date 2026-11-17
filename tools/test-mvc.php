@@ -136,7 +136,7 @@ namespace {
     Backend::$asked = [];
     check($controller->reconfigureAction() === ['status' => 'failed'] && Backend::$asked === [], 'Apply by GET: refused, nothing asked');
     Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'ok', 'changes' => ['appcontrol_cat_Web: added']]),
-        'appcontrol flush' => json_encode(['emptied' => []])];
+        'appcontrol flush' => json_encode(['killed' => ['appcontrol_cat_Gone'], 'errors' => []])];
     Backend::$asked = [];
     AppControl::$classify = '1';
     $result = (new ServiceController())->reconfigureAction();
@@ -144,6 +144,8 @@ namespace {
         'appcontrol restart'], 'Apply, classifying on: the aliases, the filter, cron, the tables of aliases gone, the classifier started again');
     check(($result['status'] ?? '') === 'ok' && $result['classify'] === true && $result['changes'] === ['appcontrol_cat_Web: added'],
         'Apply: what changed passed on to the page');
+    check(($result['gone_tables']['killed'] ?? null) === ['appcontrol_cat_Gone'],
+        'Apply: the tables of aliases gone, taken out of pf, passed on to the page');
     AppControl::$classify = '0';
     Backend::$asked = [];
     (new ServiceController())->reconfigureAction();

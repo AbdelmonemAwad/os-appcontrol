@@ -21,7 +21,7 @@ character becomes _; a name too long is cut, and given _ and four hex digits of 
 two names cut alike never meet. The alias's description carries the name nDPI gives.
 
     tables.py wanted       the aliases the settings ask for, as JSON - what aliases.php writes
-    tables.py flush-gone   the tables of aliases gone, emptied (Apply, and the plugin's removal)
+    tables.py flush-gone   the tables of aliases gone, taken out of pf (Apply, and the plugin's removal)
 """
 
 import hashlib
@@ -212,23 +212,23 @@ def flush_gone(pf, path=CONFIG):
     status, out = pf.run(['-v', '-s', 'Tables'])
     if status != 0:
         return []
-    emptied = []
+    killed = []
     for line in out.splitlines():
         parts = line.split()
         if len(parts) < 2 or not parts[1].startswith(PREFIX) or 'r' in parts[0] or parts[1] in names:
             continue
         status, text = pf.run(['-t', parts[1], '-T', 'kill'])
         if status == 0:
-            emptied.append(parts[1])
+            killed.append(parts[1])
         else:
             pf.errors.append('pfctl -t %s -T kill: %s' % (parts[1], text.strip()[:200]))
-    return emptied
+    return killed
 
 
 def main(argv):
     if argv[1:2] == ['flush-gone']:
         pf = Pf()
-        print(json.dumps({'emptied': flush_gone(pf), 'errors': pf.errors}))
+        print(json.dumps({'killed': flush_gone(pf), 'errors': pf.errors}))
         return 0
     if argv[1:2] == ['wanted']:
         conf = settings()

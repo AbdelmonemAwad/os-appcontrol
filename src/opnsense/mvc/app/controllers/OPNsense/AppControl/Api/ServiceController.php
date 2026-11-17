@@ -120,7 +120,7 @@ class ServiceController extends ApiControllerBase
         }
         $backend->configdRun('filter reload skip_alias');
         $backend->configdRun('cron restart');
-        $result['emptied'] = json_decode((string)$backend->configdRun('appcontrol flush'), true);
+        $result['gone_tables'] = json_decode((string)$backend->configdRun('appcontrol flush'), true);
         $on = $this->classifying();
         $backend->configdRun($on ? 'appcontrol restart' : 'appcontrol stop');
         $result['classify'] = $on;
