@@ -199,9 +199,11 @@ class Pf:
 
 
 def flush_gone(pf, path=CONFIG):
-    """[table] emptied: the appcontrol_ tables pf holds whose alias config.xml no longer has, and that no
-    rule uses. A table outlives its alias and its rules, and goes on holding its addresses (os-blocklists,
-    2026-10-29); one a rule still uses, or whose alias is there, is left as it is."""
+    """[table] taken out: the appcontrol_ tables pf holds whose alias config.xml no longer has, and that no
+    rule uses. A table outlives its alias and its rules and goes on holding its addresses (os-blocklists,
+    2026-10-29); emptied only, it stays listed in pf until the next boot (99 of them after Apply off and
+    after the removal, on the second XGS 3300, 2026-11-17), so it is killed. One a rule still uses, or
+    whose alias is there, is left as it is."""
     try:
         root = ET.parse(path).getroot()
         names = {(a.findtext('name') or '').strip() for a in root.findall('OPNsense/Firewall/Alias/aliases/alias')}
@@ -215,11 +217,11 @@ def flush_gone(pf, path=CONFIG):
         parts = line.split()
         if len(parts) < 2 or not parts[1].startswith(PREFIX) or 'r' in parts[0] or parts[1] in names:
             continue
-        status, text = pf.run(['-t', parts[1], '-T', 'flush'])
+        status, text = pf.run(['-t', parts[1], '-T', 'kill'])
         if status == 0:
             emptied.append(parts[1])
         else:
-            pf.errors.append('pfctl -t %s -T flush: %s' % (parts[1], text.strip()[:200]))
+            pf.errors.append('pfctl -t %s -T kill: %s' % (parts[1], text.strip()[:200]))
     return emptied
 
 

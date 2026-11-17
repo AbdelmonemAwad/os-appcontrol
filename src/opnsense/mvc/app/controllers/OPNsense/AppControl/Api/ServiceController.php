@@ -99,7 +99,7 @@ class ServiceController extends ApiControllerBase
     /**
      * the settings just saved put into the firewall: the aliases made to say what they say (aliases.php,
      * which reads the installed nDPI again first), the filter reloaded so pf holds their tables, cron so
-     * their Expire runs, the tables of aliases gone emptied, then the classifier started again - or
+     * their Expire runs, the tables of aliases gone taken out of pf, then the classifier started again - or
      * stopped, when classifying is off. When the aliases could not be written nothing more is done,
      * except that a classifier turned off is stopped all the same: off means it does not run.
      */

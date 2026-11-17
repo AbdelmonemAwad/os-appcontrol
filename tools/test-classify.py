@@ -248,6 +248,8 @@ class FakePf:
             self.held.setdefault(table, set()).update(addrs)
         if verb == 'flush':
             self.held[table] = set()
+        if verb == 'kill':
+            self.held.pop(table, None)
         return 0, '%d/%d addresses %s.' % (len(addrs), len(addrs), verb)
 
 
@@ -274,6 +276,8 @@ with tempfile.TemporaryDirectory() as tmp:
                    'appcontrol_cat_Gone_used': {'198.51.100.3'}, 'bogons': {'192.0.2.0/24'}})
     check('flush-gone: only a table of the plugin\'s whose alias is gone and no rule uses',
           tables.flush_gone(tables.Pf(run=fake), config), ['appcontrol_cat_Gone'])
+    check('flush-gone: that table taken out of pf (killed), not only emptied; the others kept',
+          sorted(fake.held), ['appcontrol_cat_Gone_used', 'appcontrol_cat_Web', 'bogons'])
 
 
 # --------------------------------------------------------------------------------- the capture

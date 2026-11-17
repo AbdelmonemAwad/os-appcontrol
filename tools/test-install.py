@@ -331,8 +331,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check('uninstall.sh: then configd, the filter and cron, without the hook',
           [c for c in calls if c.startswith(('service', 'configctl filter', 'configctl cron'))],
           ['service configd restart', 'configctl filter reload skip_alias hook=no', 'configctl cron restart hook=no'])
-    check('uninstall.sh: the table of an alias gone emptied; one a rule uses, one whose alias is there, and pf\'s own left',
-          box.called('pfctl -t'), ['pfctl -t appcontrol_cat_Gone -T flush'])
+    check('uninstall.sh: the table of an alias gone taken out of pf; one a rule uses, one whose alias is there, and pf\'s own left',
+          box.called('pfctl -t'), ['pfctl -t appcontrol_cat_Gone -T kill'])
     check('uninstall.sh: ndpi left, as it was there before', (box.called('pkg'), rc, out.strip().splitlines()[-1]),
           ([], 0, 'Application Control removed; its settings stay in config.xml'))
 
@@ -403,10 +403,10 @@ with tempfile.TemporaryDirectory() as tmp:
     rc, out = box.run('pkg/post-deinstall.sh')
     check('post-deinstall.sh: nothing of the plugin left - the menu file, Python\'s caches, the state, the pidfile',
           box.plugin_files(), [])
-    check('post-deinstall.sh: configd, the filter and cron, the table of an alias gone emptied',
+    check('post-deinstall.sh: configd, the filter and cron, the table of an alias gone taken out of pf',
           box.called('service') + [c for c in box.called('configctl')] + box.called('pfctl -t'),
           ['service configd restart', 'configctl filter reload skip_alias hook=no', 'configctl cron restart hook=no',
-           'pfctl -t appcontrol_cat_Gone -T flush', 'pfctl -t appcontrol_cat_Web -T flush'])
+           'pfctl -t appcontrol_cat_Gone -T kill', 'pfctl -t appcontrol_cat_Web -T kill'])
     check('post-deinstall.sh: the window files\' tmpfs taken down before the state goes', box.called('umount'),
           ['umount -f %s' % (box.fake + WORK)])
 

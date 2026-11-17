@@ -211,7 +211,7 @@ On 2026-11-17, from this branch, away from an appliance - the checks, run under 
   package `ndpi` installed when missing and removed only when the installer installed it and nothing
   needs it, the classifier started on by default or stopped when off, the tmpfs of the window files
   mounted at its start - once - and taken down at its stop, running or not, and by every removal, the
-  classifier stopped and the aliases taken out before the files go, the tables of aliases gone emptied,
+  classifier stopped and the aliases taken out before the files go, the tables of aliases gone taken out of pf,
   and nothing done by the old package in an upgrade;
 - **the self-update** - `tools/test-self-update.py`, 45 checks, as os-blocklists has it;
 - **the strings** - `tools/check-strings.py`: each of the 156 strings the GUI shows is in `source.json`,
@@ -258,7 +258,7 @@ run again: the settings in config.xml are kept.
 
 `sh install/uninstall.sh` stops the classifier, takes the plugin's aliases out of Firewall: Aliases
 (switched off instead where a rule or a setting still names one), takes down the tmpfs of its window
-files, removes its files and its state, empties the tables of the aliases gone, and removes the
+files, removes its files and its state, takes the tables of the aliases gone out of pf, and removes the
 package `ndpi` only when `install.sh` installed it and no other package needs it. The settings stay in
 config.xml.
 

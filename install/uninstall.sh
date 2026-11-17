@@ -43,13 +43,13 @@ rm -f /var/lib/php/tmp/opnsense_menu_cache.xml /var/lib/php/tmp/opnsense_acl_cac
     /tmp/opnsense_menu_cache.xml /tmp/opnsense_acl_cache.json
 configctl filter reload skip_alias > /dev/null 2>&1 || true
 configctl cron restart > /dev/null 2>&1 || true
-# The tables of the plugin's aliases that are gone, emptied when no rule uses them: a table outlives
+# The tables of the plugin's aliases that are gone, taken out of pf when no rule uses them: a table outlives
 # its alias and goes on holding the addresses (os-blocklists, 2026-10-29). One whose alias is still in
 # Firewall: Aliases - switched off, as something names it - is OPNsense's to keep.
 /sbin/pfctl -v -s Tables 2> /dev/null | awk '$2 ~ /^appcontrol_/ && $1 !~ /r/ { print $2 }' |
 while read -r table; do
     grep -q "<name>${table}</name>" /conf/config.xml 2> /dev/null && continue
-    /sbin/pfctl -t "${table}" -T flush > /dev/null 2>&1 || true
+    /sbin/pfctl -t "${table}" -T kill > /dev/null 2>&1 || true
 done
 
 if [ "${NDPI}" = ours ]; then
