@@ -19,6 +19,7 @@
     python3 tools/test-classify.py"""
 import json
 import os
+import select
 import stat
 import struct
 import sys
@@ -50,6 +51,12 @@ def check(name, got, want):
     ok = got == want
     failures += 0 if ok else 1
     print('%s %s%s' % ('ok  ' if ok else 'FAIL', name, '' if ok else ' - got %r, want %r' % (got, want)))
+
+
+def program(path, text):
+    with open(path, 'w') as handle:
+        handle.write(text)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def labels(rows):
@@ -660,15 +667,51 @@ with tempfile.TemporaryDirectory() as tmp:
           [('wan', 'em0'), ('opt4', 'wg0')])
     check('the internal networks, for the tables: those of the interfaces internal by default, whatever Settings chose, '
           'and those watched', classify.lan_devices([('opt4', 'wg0')], config), {'em1', 'em4', 'wg0'})
+    text = open(config).read().replace('</interfaces>', '</interfaces><gateways><gateway_item><interface>opt3</interface>'
+                                                        '<name>GW_OPT3</name></gateway_item></gateways>')
+    with open(config, 'w') as handle:
+        handle.write(text)
+    check('none chosen: not one System: Gateways gives a gateway', classify.interfaces({'interfaces': []}, config),
+          [('lan', 'em1')])
+
+
+# ------------------------------------------------------------- a capture that stops: tried again, said once
+with tempfile.TemporaryDirectory() as tmp:
+    quitter, writer = os.path.join(tmp, 'quits'), os.path.join(tmp, 'writes')
+    program(quitter, '#!/bin/sh\nexit 1\n')
+    program(writer, '#!/usr/bin/env python3\nimport sys, time\nsys.path.insert(0, %r)\nimport pcapgen\n'
+            'sys.stdout.buffer.write(pcapgen.header())\nsys.stdout.buffer.flush()\ntime.sleep(30)\n' % HERE)
+    said = []
+    real_log = classify.log
+    classify.log = said.append
+    try:
+        state = classify.State(T0, catalogue, {'apps': []}, [('opt9', 'em9')])
+        cap = classify.Capture('opt9', 'em9', T0, tcpdump=quitter)
+        t, waits = T0, []
+        for _ in range(7):
+            if cap.start(t):
+                cap.proc.wait()
+                cap.read(t)
+            cap.trouble(state, t)
+            waits.append(cap.retry_at - t)
+            t = cap.retry_at
+        check('a capture stopping again and again - its device gone: started again after 30 s, the wait doubled each time '
+              'to 10 minutes, said once', (waits, said), ([30, 60, 120, 240, 480, 600, 600],
+                                                          ['tcpdump stopped on em9: there is no such device']))
+        cap.tcpdump = writer
+        cap.start(t)
+        deadline = time.time() + 10
+        while cap.stream.header is None and time.time() < deadline:
+            select.select([cap], [], [], 0.5)
+            cap.read(t)
+        check('the capture reading again: said, and its wait back to 30 s', (said[1:], cap.delay, cap.failing),
+              (['Application Control: capturing again on opt9 (em9)'], 30, False))
+        cap.stop()
+    finally:
+        classify.log = real_log
 
 
 # ------------------------------------------------------------- one run of the service, with stand-ins
-def program(path, text):
-    with open(path, 'w') as handle:
-        handle.write(text)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
 HEADER = open(os.path.join(FIX, 'lab-update.csv'), encoding='utf-8').readline()
 
 
@@ -860,7 +903,7 @@ COPY_READER = ('#!/usr/bin/env python3\nimport shutil, sys\nopen(%r, "a").write(
 
 
 def service(tmp, packets, any_rows, dpi_rows, reader=COPY_READER, stop_after=1, cat=None, more_interfaces='',
-            timeout=40, **kwargs):
+            timeout=40, change=None, **kwargs):
     """One run of the service with stand-ins, in tmp: tcpdump writing what the Python in packets puts in p
     (t its start, pcapgen there) and then waiting; ndpiReader (reader, %-formatted with the calls file and
     the two CSVs) - COPY_READER copies the CSV of the run asked for; ifconfig and a stand-in pfctl. Stopped
@@ -872,16 +915,16 @@ def service(tmp, packets, any_rows, dpi_rows, reader=COPY_READER, stop_after=1, 
             handle.write(csv_rows(pairs))
     program(os.path.join(tmp, 'ndpiReader'), reader % (calls, dpi_csv, any_csv) if '%r' in reader else reader)
     program(os.path.join(tmp, 'tcpdump'), '#!/usr/bin/env python3\nimport os, sys, time\nsys.path.insert(0, %r)\n'
-            'import pcapgen\nopen(%r, "a").write("tcpdump " + " ".join(sys.argv[1:]) + "\\n")\n'
+            'import pcapgen\nopen(%r, "a").write("tcpdump " + " ".join(sys.argv[1:]) + " pid=%%d\\n" %% os.getpid())\n'
             't = time.time()\nhello = pcapgen.client_hello(padding=1700)\np = []\n%s\n'
             'sys.stdout.buffer.write(pcapgen.capture(p))\nsys.stdout.buffer.flush()\n'
-            'while True:\n    time.sleep(1)\n' % (HERE, calls, packets))
+            'time.sleep(120)\n' % (HERE, calls, packets))
     with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
         handle.write(IFCONFIG_TEXT)
     program(os.path.join(tmp, 'ifconfig'), '#!/bin/sh\necho "ifconfig $*" >> %s\ncat %s\n' % (calls, os.path.join(tmp, 'ifconfig.txt')))
     config = os.path.join(tmp, 'config.xml')
     with open(config, 'w') as handle:
-        handle.write(SERVICE_CONFIG % more_interfaces)
+        handle.write((change or str)(SERVICE_CONFIG % more_interfaces))
     with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
         json.dump(cat or catalogue, handle)
     fake = FakePf()
@@ -958,6 +1001,53 @@ with tempfile.TemporaryDirectory() as tmp:
     state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, now=Clock(-1000, 3), timeout=15)
     check('the clock gone back 1000 s: windows close again at once, in the clock\'s new time',
           (state.windows, state.last and state.last['window'] < int(began // classify.WINDOW)), (1, True))
+
+
+# ------------------------------------------------------------- the interfaces, read again at each window's close
+def rewrite_later(tmp, change, after=0.3):
+    """config.xml changed after a moment, while the service runs."""
+    def later():
+        path = os.path.join(tmp, 'config.xml')
+        try:
+            text = change(open(path).read())
+            with open(path + '.new', 'w') as handle:
+                handle.write(text)
+            os.replace(path + '.new', path)
+        except OSError:
+            pass                                    # the run is over already
+    timer = threading.Timer(after, later)
+    timer.start()
+    return timer
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    opt1 = '<opt1><enable>1</enable><if>em2</if><ipaddr>198.51.100.129</ipaddr></opt1>'
+    rewrite_later(tmp, lambda text: text.replace('<lan><enable>1</enable>', '<lan>').replace('</interfaces>', opt1 + '</interfaces>'))
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, stop_after=2)
+    alive = []
+    for line in asked:
+        if line.startswith('tcpdump'):
+            try:
+                os.kill(int(line.rsplit('pid=', 1)[1]), 0)
+                alive.append(line.split(' -i ')[1].split()[0])
+            except OSError:
+                pass
+    check('the interfaces read again at a window\'s close: one switched off since stopped, one assigned since started',
+          ([line.split(' -i ')[1].split()[0] for line in asked if line.startswith('tcpdump')],
+           [(i['key'], i['device']) for i in saved['interfaces']], alive), (['em1', 'em2'], [('opt1', 'em2')], []))
+with tempfile.TemporaryDirectory() as tmp:
+    rewrite_later(tmp, lambda text: text.replace('<lan>', '<lan><enable>1</enable>'))
+    said = []
+    real_log = classify.log
+    classify.log = said.append
+    try:
+        state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, stop_after=3,
+                                                  change=lambda text: text.replace('<lan><enable>1</enable>', '<lan>'))
+    finally:
+        classify.log = real_log
+    check('no interface to watch when the service began: said, and the one switched on since followed at a window\'s close',
+          ([m for m in said if 'no interface' in m], [line.split(' -i ')[1].split()[0] for line in asked if line.startswith('tcpdump')]),
+          (['no interface to watch: none is internal, and none is chosen in Settings'], ['em1']))
 
 # --------------------------------------------------------------------------- what the page reads
 import status                                                            # noqa: E402

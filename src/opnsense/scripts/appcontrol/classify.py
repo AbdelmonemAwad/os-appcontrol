@@ -48,6 +48,7 @@ import os
 import re
 import select
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -73,7 +74,8 @@ WINDOW = 60.0               # seconds a window gathers new connections
 GRACE = 10.0                # seconds a window stays open after it ends, for its connections' later packets
 PACKETS_PER_WINDOW = 2000000  # packets one interface is read for in a window; past it, the rest waits
 UNKNOWN_KEEP = 500          # rows the Unknown list keeps of each kind, the latest
-RETRY = 30.0                # seconds before a capture that stopped is started again
+RETRY = 30.0                # seconds before a capture that stopped is started again, doubled each time
+RETRY_MOST = 600.0          # it stops again, up to this
 BEHIND = 2                  # windows past their close with none being judged that mean the clock stepped
                             # forward: a window judged past TIMEOUT leaves at most two behind
 
@@ -98,13 +100,14 @@ def write_json(path, data):
 
 def interfaces(conf, path=CONFIG):
     """[(key, device)] watched: the interfaces chosen in Settings that are switched on; with none chosen,
-    every internal one - switched on, not the WAN, no gateway, an address of its own that is not
-    obtained from upstream."""
+    every internal one - switched on, not the WAN, no gateway of its own nor one in System: Gateways, an
+    address of its own that is not obtained from upstream. Read again at each window's close."""
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError):
         return []
     found = root.find('interfaces')
+    routed = {(g.findtext('interface') or '').strip() for g in root.findall('gateways/gateway_item')}
     out = []
     for node in (list(found) if found is not None else []):
         key, dev = node.tag, (node.findtext('if') or '').strip()
@@ -114,7 +117,7 @@ def interfaces(conf, path=CONFIG):
             if key in conf['interfaces']:
                 out.append((key, dev))
             continue
-        if key == 'wan' or node.find('internal_dynamic') is not None:
+        if key == 'wan' or key in routed or node.find('internal_dynamic') is not None:
             continue
         if (node.findtext('gateway') or '').strip() or (node.findtext('gatewayv6') or '').strip():
             continue
@@ -400,7 +403,9 @@ def _unknown(state, kind, name, proto, server, server_name, ja4, iface, now):
 
 
 class Capture:
-    """tcpdump -p on one interface, its pipe read without waiting, its packets handed to capture.Flows."""
+    """tcpdump -p on one interface, its pipe read without waiting, its packets handed to capture.Flows.
+    Stopped - its device gone, say - it is started again after RETRY seconds, the wait doubled each time
+    it stops again, up to RETRY_MOST; said when it stops and when it reads again, not each time."""
 
     def __init__(self, key, dev, now, tcpdump=TCPDUMP):
         self.key, self.dev = key, dev
@@ -412,6 +417,8 @@ class Capture:
         self.window = None
         self.error = None
         self.retry_at = 0.0
+        self.delay = RETRY
+        self.failing = False
 
     def start(self, now):
         self.stream = capture.Stream()
@@ -425,7 +432,6 @@ class Capture:
         except OSError as error:
             self.proc = None
             self.error = 'tcpdump could not be started on %s: %s' % (self.dev, error)
-            self.retry_at = now + RETRY
             return False
         fd = self.proc.stdout.fileno()
         fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
@@ -435,8 +441,18 @@ class Capture:
     def fileno(self):
         return self.proc.stdout.fileno()
 
+    def trouble(self, state, now):
+        """It stopped, or would not start: started again after its wait, which doubles; said only when it
+        was reading until now."""
+        self.stop()
+        self.retry_at = now + self.delay
+        self.delay = min(self.delay * 2, RETRY_MOST)
+        if not self.failing:
+            self.failing = True
+            state.fail(self.error, now)
+
     def read(self, now):
-        """What the pipe holds; False when tcpdump has stopped."""
+        """What the pipe holds; False when tcpdump has stopped, why in error."""
         try:
             data = os.read(self.fileno(), 1 << 20)
         except OSError as error:
@@ -444,17 +460,17 @@ class Capture:
                 return True
             data = b''
         if not data:
-            self.stop()
-            self.error = 'tcpdump stopped on %s' % self.dev
-            self.retry_at = now + RETRY
+            self.error = 'tcpdump stopped on %s%s' % (self.dev, '' if _device(self.dev) else ': there is no such device')
             return False
         try:
             packets = self.stream.feed(data)
         except capture.StreamError as error:
-            self.stop()
             self.error = 'what tcpdump wrote on %s could not be read: %s' % (self.dev, error)
-            self.retry_at = now + RETRY
             return False
+        if self.failing:
+            # reading again: said, and its wait starts over
+            log('Application Control: capturing again on %s (%s)' % (self.key, self.dev))
+            self.failing, self.delay = False, RETRY
         linktype = self.stream.linktype
         for ts, record, wire in packets:
             try:
@@ -481,6 +497,37 @@ class Capture:
         except OSError:
             pass
         self.proc = None
+
+
+def _device(dev):
+    """Whether the system has the device: a VLAN, a tunnel or a PPP link can go, and come back."""
+    try:
+        socket.if_nametoindex(dev)
+        return True
+    except OSError:
+        return False
+
+
+def follow(state, captures, watched, now, tcpdump=TCPDUMP):
+    """The captures made to match the interfaces watched: one for an interface no longer watched, or on
+    another device now, stopped; one for an interface newly watched, started. Said when they change."""
+    have = {(c.key, c.dev): c for c in captures}
+    out = []
+    for key, dev in watched:
+        c = have.pop((key, dev), None)
+        if c is None:
+            c = Capture(key, dev, now, tcpdump)
+            if not c.start(now):
+                c.trouble(state, now)
+        out.append(c)
+    for c in have.values():
+        c.stop()
+    if [(c.key, c.dev) for c in out] != [(c.key, c.dev) for c in captures]:
+        if out:
+            log('Application Control: classifying on %s' % ', '.join('%s (%s)' % (c.key, c.dev) for c in out))
+        else:
+            state.fail('no interface to watch: none is internal, and none is chosen in Settings', now)
+    return out
 
 
 class Job:
@@ -640,8 +687,6 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
         state.fail('nDPI is not installed: %s is missing (pkg install ndpi)' % reader)
     elif not catalogue.get('categories'):
         state.fail('the categories of the installed nDPI are not read yet (apps.py refresh)')
-    elif not watched:
-        state.fail('no interface to watch: none is internal, and none is chosen in Settings')
     if state.error is not None:
         # nothing to do until Settings or the package change; the service stays, and says why
         save([])
@@ -649,11 +694,10 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             time.sleep(5)
         return state
 
-    captures = [Capture(key, dev, start, tcpdump) for key, dev in watched]
-    for c in captures:
-        if not c.start(start):
-            state.fail(c.error)
-    log('Application Control: classifying on %s' % ', '.join('%s (%s)' % (c.key, c.dev) for c in captures))
+    captures = follow(state, [], watched, start, tcpdump)
+    if not watched:
+        # the interfaces are read again at each window's close: one assigned since is followed
+        state.fail('no interface to watch: none is internal, and none is chosen in Settings', start)
     look(start)
     save(captures)
     next_close = int(start // WINDOW)
@@ -670,7 +714,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
         t = now()
         for c in ready:
             if not c.read(t):
-                state.fail(c.error, t)
+                c.trouble(state, t)
         current = int(t // WINDOW)
         for c in captures:
             if c.window != current:
@@ -679,7 +723,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                 c.window, c.read_in_window = current, 0
             if c.proc is None and t >= c.retry_at:
                 if not c.start(t):
-                    state.fail(c.error, t)
+                    c.trouble(state, t)
         due = int((t - GRACE) // WINDOW) - 1
         if current < next_close or (job is None and due - next_close > BEHIND):
             # The clock stepped back - the windows still open would wait for it, and every connection
@@ -708,6 +752,9 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                 else:
                     unread_flows += len(win.flows)
                 c.flows.forget(t)
+            # the interfaces again: one assigned, switched on or off, or removed since is followed
+            watched = state.watched = interfaces(conf, config)
+            captures = follow(state, captures, watched, t, tcpdump)
             look(t)
             job = Job(next_close, parts, reader, work)
             job.unread = unread_flows
