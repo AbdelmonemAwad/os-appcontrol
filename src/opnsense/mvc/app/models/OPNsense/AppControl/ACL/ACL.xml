@@ -1,0 +1,14 @@
+<!--
+    SPDX-License-Identifier: BSD-2-Clause
+    Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
+-->
+<acl>
+    <page-firewall-appcontrol>
+        <name>Firewall: Application Control</name>
+        <description>Allow access to application control: applications nDPI names, firewall aliases it fills, and its settings</description>
+        <patterns>
+            <pattern>ui/appcontrol/*</pattern>
+            <pattern>api/appcontrol/*</pattern>
+        </patterns>
+    </page-firewall-appcontrol>
+</acl>

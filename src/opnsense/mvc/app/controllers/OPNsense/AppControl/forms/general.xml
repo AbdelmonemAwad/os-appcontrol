@@ -1,0 +1,30 @@
+<!--
+    SPDX-License-Identifier: BSD-2-Clause
+    Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
+-->
+<form>
+    <field>
+        <id>appcontrol.general.classify</id>
+        <label>Classify connections</label>
+        <type>checkbox</type>
+        <help>Name each connection's application with nDPI and keep the servers it names in pf tables, aliases in Firewall: Aliases. It reads a copy of what the firewall sees and changes no traffic. Off, the classifier stops and its aliases leave Firewall: Aliases - switched off instead where a rule or a setting still names one.</help>
+    </field>
+    <field>
+        <id>appcontrol.general.interfaces</id>
+        <label>Interfaces</label>
+        <type>select_multiple</type>
+        <help>Where connections are read. None chosen: every internal interface - one with an address of its own and no gateway. No port is made promiscuous.</help>
+    </field>
+    <field>
+        <id>appcontrol.general.apps</id>
+        <label>Application tables</label>
+        <type>select_multiple</type>
+        <help>A table of its own for each application chosen, appcontrol_ and its name, holding servers it was seen with. Every nDPI category has a table without being chosen: appcontrol_cat_ and its name. The list is the installed nDPI's.</help>
+    </field>
+    <field>
+        <id>appcontrol.general.ttl</id>
+        <label>Address expiry (seconds)</label>
+        <type>text</type>
+        <help>How long an address stays in a table once unseen: the Expire of the tables' aliases, carried out by OPNsense's own cron. Seen again, its time starts again.</help>
+    </field>
+</form>

@@ -1,0 +1,14 @@
+<!--
+    SPDX-License-Identifier: BSD-2-Clause
+    Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
+-->
+<menu>
+    <!--
+        Where os-xgs-npu is not installed: under Firewall, beside Aliases and Rules, because this page
+        fills aliases that rules choose from (the plan's settled point 12). No order is given.
+        place-menu.sh copies this file, or xgs.xml, to the model's Menu/Menu.xml.
+    -->
+    <Firewall>
+        <AppControl VisibleName="Application Control" cssClass="fa fa-shapes fa-fw" url="/ui/appcontrol"/>
+    </Firewall>
+</menu>

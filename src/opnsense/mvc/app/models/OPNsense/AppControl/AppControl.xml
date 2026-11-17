@@ -1,0 +1,53 @@
+<!--
+    SPDX-License-Identifier: BSD-2-Clause
+    Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
+-->
+<model>
+    <mount>//OPNsense/AppControl</mount>
+    <version>1.0.0</version>
+    <description>Application control</description>
+    <items>
+        <!--
+            classify.py, tables.py, status.py and plugins.inc.d/appcontrol.inc read these straight out
+            of config.xml by element name, so the names are not free.
+        -->
+        <general>
+            <!--
+                On by default (the plan's svc-5-07): classifying copies what the host already sees and
+                changes no traffic, so it works after the install with nothing set. With no element in
+                config.xml - a fresh install - the scripts take it as on too.
+            -->
+            <classify type="BooleanField">
+                <Required>Y</Required>
+                <Default>1</Default>
+            </classify>
+            <!-- none chosen: every internal interface - no gateway, an address of its own (classify.py) -->
+            <interfaces type="InterfaceField">
+                <Required>N</Required>
+                <Multiple>Y</Multiple>
+                <Filters>
+                    <if>/^(?!lo0$).*/</if>
+                </Filters>
+            </interfaces>
+            <!-- the protocols the installed nDPI knows, by name (apps.py list, through configd) -->
+            <apps type="JsonKeyValueStoreField">
+                <Required>N</Required>
+                <Multiple>Y</Multiple>
+                <ConfigdPopulateAct>appcontrol apps</ConfigdPopulateAct>
+                <SortByValue>Y</SortByValue>
+            </apps>
+            <!--
+                The alias's Expire: an address not seen again for this long leaves its table. 3600 s as
+                OPNsense's own virusprot and sshlockout; phase 0's lab (L5) found nothing asking for less.
+                60 is the least the Alias model takes.
+            -->
+            <ttl type="IntegerField">
+                <Required>Y</Required>
+                <Default>3600</Default>
+                <MinimumValue>60</MinimumValue>
+                <MaximumValue>999999999</MaximumValue>
+                <ValidationMessage>Seconds, 60 or more.</ValidationMessage>
+            </ttl>
+        </general>
+    </items>
+</model>
