@@ -9,11 +9,21 @@
  * del(), getByName(), setNodes(), performValidation(), serializeToConfig() - and Config's save(), as
  * the lab's L9 used them on an XGS 3300 to make an External alias with Expire.
  *
- * What is checked: an alias made External with Expire for each table wanted; its Expire refreshed when
- * the setting changes, and nothing written when nothing changed; on removal, every alias of the
- * plugin's taken out - switched off instead when a rule or a setting still names it - and none of the
- * owner's touched, whatever its name; aliases.php saving only after a clean validation, and touching
- * nothing when the names cannot be read.
+ * The stand-in's performValidation() validates what is written, as OPNsense 26.7's Alias model does
+ * the fields this plugin writes - its Alias.xml, AliasNameField.php and DescriptionField.php: a name
+ * that begins with a letter or one underscore, letters, digits and underscores, at most 31 characters,
+ * no service or protocol name, and no other alias's; enabled 0 or 1; a type of its list; an Expire from
+ * 60 to 999999999; a description of one line, at most 255 bytes. Two of its checks are not repeated:
+ * AliasNameField's list of pf's keywords, none of which begins with appcontrol_ as every name the
+ * plugin writes does, and the content's checks, of which an External alias has none.
+ *
+ * What is checked: an alias made External with Expire for each table wanted; every alias the plugin
+ * would make - a table for each of nDPI's categories and each application of ndpiReader -H, names cut
+ * and names that meet among them - taken by that validation, and a name it refuses refused; its Expire
+ * refreshed when the setting changes, and nothing written when nothing changed; on removal, every alias
+ * of the plugin's taken out - switched off instead when a rule or a setting still names it - and none
+ * of the owner's touched, whatever its name; aliases.php saving only after a clean validation, and
+ * touching nothing when the names cannot be read or the model refuses one.
  *
  *   php tools/test-aliases.php
  */
@@ -95,11 +105,10 @@ namespace OPNsense\Firewall {
         }
     }
 
-    /* the model: the aliases given in $given, and what a validation finds in $invalid */
+    /* the model: the aliases given in $given, validated as OPNsense's own model validates them */
     class Alias
     {
         public static $given = [];
-        public static $invalid = [];
         public static $serialized = null;
         public $aliases;
 
@@ -124,8 +133,12 @@ namespace OPNsense\Firewall {
 
         public function performValidation()
         {
+            $nodes = [];
+            foreach ($this->aliases->alias->nodes as $uuid => $node) {
+                $nodes[$uuid] = $node->fields;
+            }
             $out = [];
-            foreach (self::$invalid as $field => $message) {
+            foreach (\standin_alias_messages($nodes) as [$field, $message]) {
                 $out[] = new \OPNsense\Base\Messages\Message($message, $field);
             }
             return $out;
@@ -168,6 +181,85 @@ namespace {
     $failed = 0;
     $checks = 0;
 
+    /*
+     * The validation of the stand-ins, here and in aliases.php's run below: [[field, message]] of the
+     * aliases given (uuid => fields), as OPNsense 26.7's Alias model checks the fields this plugin writes
+     * (the comment at the top says which of its checks are not repeated). Its messages are the model's.
+     */
+    $validation = <<<'VALIDATION'
+<?php
+function standin_alias_messages(array $nodes)
+{
+    static $services = null;
+    if ($services === null) {
+        /* as OPNsense's Util::getservbyname(): every name and alias /etc/services gives */
+        $services = [];
+        foreach (explode("\n", (string)@file_get_contents('/etc/services')) as $line) {
+            if (strlen($line) > 1 && $line[0] != '#') {
+                foreach (preg_split('/\s+/', $line) as $idx => $word) {
+                    if ($word === '' || $word[0] == '#') {
+                        break;
+                    } elseif ($idx != 1) {
+                        $services[$word] = true;
+                    }
+                }
+            }
+        }
+    }
+    $types = ['host', 'network', 'port', 'url', 'urltable', 'urljson', 'geoip', 'networkgroup', 'mac', 'asn',
+        'dynipv6host', 'authgroup', 'internal', 'external'];
+    $named = [];
+    foreach ($nodes as $uuid => $fields) {
+        $named[(string)($fields['name'] ?? '')][] = $uuid;
+    }
+    $out = [];
+    foreach ($nodes as $uuid => $fields) {
+        $at = 'aliases.alias.' . $uuid . '.';
+        $name = (string)($fields['name'] ?? '');
+        if ($name === '') {
+            $out[] = [$at . 'name', 'A value is required.'];
+        } elseif (!preg_match('/^([a-zA-Z]|(([_a-zA-Z][a-zA-Z0-9]|[a-zA-Z][_a-zA-Z0-9])[_a-zA-Z0-9]{0,29}))$/', $name)) {
+            $out[] = [$at . 'name', 'The name must start with a letter or single underscore, be less than 32 characters ' .
+                'and only consist of alphanumeric characters or underscores.'];
+        }
+        if ($name !== '' && (isset($services[$name]) || getprotobyname($name) !== false)) {
+            $out[] = [$at . 'name', 'Reserved protocol or service names may not be used'];
+        }
+        if (count($named[$name]) > 1) {
+            $out[] = [$at . 'name', 'An alias with this name already exists.'];
+        }
+        if (!in_array((string)($fields['enabled'] ?? ''), ['0', '1'], true)) {
+            $out[] = [$at . 'enabled', 'Value should be a boolean (0,1).'];
+        }
+        if (!in_array((string)($fields['type'] ?? ''), $types, true)) {
+            $out[] = [$at . 'type', sprintf('Option [%s] not in list.', (string)($fields['type'] ?? ''))];
+        }
+        $expire = (string)($fields['expire'] ?? '');
+        if ($expire !== '' && (!ctype_digit($expire) || (int)$expire < 60 || (int)$expire > 999999999)) {
+            $out[] = [$at . 'expire', 'Invalid integer value.'];
+        }
+        $text = (string)($fields['description'] ?? '');
+        if ($text !== '' && !preg_match('/^(.){1,255}$/', $text)) {
+            $out[] = [$at . 'description', 'Description should be a string between 1 and 255 characters.'];
+        }
+    }
+    return $out;
+}
+VALIDATION;
+    $tmp = sys_get_temp_dir() . '/test-aliases.' . getmypid();
+    @mkdir($tmp . '/script', 0755, true);
+    file_put_contents($tmp . '/validation.php', $validation);
+    require $tmp . '/validation.php';
+
+    function refused($model)
+    {
+        $out = [];
+        foreach ($model->performValidation() as $message) {
+            $out[] = $message->getField() . ': ' . $message->getMessage();
+        }
+        return $out;
+    }
+
     function check($ok, $what)
     {
         global $failed, $checks;
@@ -200,12 +292,45 @@ namespace {
     check($web !== null && $web->fields === ['name' => 'appcontrol_cat_Web', 'enabled' => '1', 'type' => 'external',
         'expire' => '3600', 'description' => 'Application Control: category Web'],
         'an alias made: switched on, External, Expire 3600, described as the plugin\'s');
+    check(refused($model) === [], 'the two aliases made: taken by the model\'s validation');
     check(Aliases::reconcile(new Alias(), '', ['appcontrol_x' => []], 10)['changes'] === ['appcontrol_x: added'] &&
         (function () {
             $m = new Alias();
             Aliases::reconcile($m, '', ['appcontrol_x' => []], 10);
-            return $m->getByName('appcontrol_x')->expire === '60';
-        })(), 'an expiry under 60 s (the least OPNsense takes): 60');
+            return $m->getByName('appcontrol_x')->expire === '60' && refused($m) === [];
+        })(), 'an expiry under 60 s (the least OPNsense takes): 60, which the validation takes');
+
+    /* every alias the plugin would make, through the validation: tables.py's names for nDPI's categories
+       and the applications of ndpiReader -H, with a name too long to keep and two that meet in one */
+    $py = 'import json, sys; sys.path.insert(0, sys.argv[1]); import apps, ndpi, tables; '
+        . 'cats = apps.committed(); protos = ndpi.parse_protocols(open(sys.argv[2]).read(), cats); '
+        . 'protos.update({"Apple-Music": "Music", "Apple_Music": "Music", "An_application_of_a_long_name": "Web"}); '
+        . 'print(json.dumps(tables.wanted({"classify": True, "apps": sorted(protos)}, {"categories": cats, "protocols": protos})))';
+    $all = json_decode((string)shell_exec('python3 -c ' . escapeshellarg($py) . ' ' .
+        escapeshellarg($root . '/src/opnsense/scripts/appcontrol') . ' ' . escapeshellarg($root . '/tools/fixtures/ndpiReader-H.txt')), true);
+    Alias::$given = [];
+    $model = new Alias();
+    $done = Aliases::reconcile($model, '', is_array($all) ? $all : [], 3600);
+    check(is_array($all) && count($all) === 93 + 16 + 3 && count($done['changes']) === count($all) && refused($model) === [],
+        'every alias the plugin would make - nDPI\'s 93 categories, the 16 applications of -H, a name cut, two that meet - ' .
+        'taken by the validation');
+
+    /* and what the model refuses, refused here */
+    Alias::$given = [];
+    $model = new Alias();
+    Aliases::reconcile($model, '', ['appcontrol_bad-name' => [], 'appcontrol_' . str_repeat('x', 21) => [], '9appcontrol' => []], 3600);
+    check(count(refused($model)) === 3 && substr_count(implode("\n", refused($model)), ': The name must start with a letter') === 3,
+        'a name with a hyphen, one of 32 characters, one beginning with a digit: each refused');
+    Alias::$given = ['u1' => ours('appcontrol_cat_Web', 'category Web'), 'u2' => ours('appcontrol_cat_Web', 'category Web'),
+        'u3' => ours('appcontrol_YouTube', 'YouTube', ['expire' => '30']), 'u4' => ours('appcontrol_DNS', 'DNS', ['type' => 'externa']),
+        'u5' => ours('ssh', 'ssh', ['enabled' => 'yes']), 'u6' => ours('appcontrol_cat_Video', "category\nVideo")];
+    check(refused(new Alias()) === ['aliases.alias.u1.name: An alias with this name already exists.',
+        'aliases.alias.u2.name: An alias with this name already exists.', 'aliases.alias.u3.expire: Invalid integer value.',
+        'aliases.alias.u4.type: Option [externa] not in list.', 'aliases.alias.u5.name: Reserved protocol or service names may not be used',
+        'aliases.alias.u5.enabled: Value should be a boolean (0,1).',
+        'aliases.alias.u6.description: Description should be a string between 1 and 255 characters.'],
+        'two aliases of one name, an Expire under 60, a type not of the list, a service\'s name, enabled neither 0 nor 1, a ' .
+        'description of two lines: each refused, as the model refuses it');
 
     /* refreshed: the Expire of one already there, when the setting changed; nothing when nothing did */
     Alias::$given = ['u1' => ours('appcontrol_cat_Web', 'category Web'), 'u2' => ours('appcontrol_YouTube', 'YouTube')];
@@ -260,9 +385,8 @@ namespace {
         !Aliases::owned('appcontrol_cat_Web', 'my own') && !Aliases::owned('office', 'Application Control: x'),
         'an alias is the plugin\'s by its name and its description together');
 
-    /* aliases.php, run as configd runs it: load_phalcon.php and the two scripts it asks stood in */
-    $tmp = sys_get_temp_dir() . '/test-aliases.' . getmypid();
-    @mkdir($tmp . '/script', 0755, true);
+    /* aliases.php, run as configd runs it: load_phalcon.php and the two scripts it asks stood in, the
+       model validating as above */
     $state = $tmp . '/state.json';
     file_put_contents($tmp . '/script/load_phalcon.php', '<?php
 namespace OPNsense\Base\Messages { class Message { private $m; private $f;
@@ -280,14 +404,15 @@ namespace OPNsense\Firewall {
         public function __construct() { $l = new AliasList(); $s = json_decode((string)@file_get_contents(getenv("STATE")), true);
             foreach (($s["aliases"] ?? []) as $u => $f) { $l->nodes[$u] = new AliasNode($f); } $this->aliases = (object)["alias" => $l]; }
         public function getByName($n) { foreach ($this->aliases->alias->nodes as $x) { if ($x->name === $n) { return $x; } } return null; }
-        public function performValidation() { $bad = getenv("INVALID"); return $bad ? [new \OPNsense\Base\Messages\Message($bad, "aliases.alias.u1.name")] : []; }
+        public function performValidation() { $n = []; foreach ($this->aliases->alias->nodes as $u => $x) { $n[$u] = $x->fields; }
+            $o = []; foreach (\standin_alias_messages($n) as $m) { $o[] = new \OPNsense\Base\Messages\Message($m[1], $m[0]); } return $o; }
         public function serializeToConfig() { $s = json_decode((string)@file_get_contents(getenv("STATE")), true) ?: [];
             $s["aliases"] = []; foreach ($this->aliases->alias->nodes as $u => $n) { $s["aliases"][$u] = $n->fields; }
             $s["serialized"] = ($s["serialized"] ?? 0) + 1; file_put_contents(getenv("STATE"), json_encode($s)); } } }
 namespace OPNsense\Core { class Config { public static function getInstance() { return new self(); }
     public function save() { $s = json_decode((string)file_get_contents(getenv("STATE")), true);
         $s["saved"] = ($s["saved"] ?? 0) + 1; file_put_contents(getenv("STATE"), json_encode($s)); } } }
-namespace { require "' . $root . '/src/opnsense/mvc/app/library/OPNsense/AppControl/Aliases.php"; }
+namespace { require "' . $root . '/src/opnsense/mvc/app/library/OPNsense/AppControl/Aliases.php"; require "' . $tmp . '/validation.php"; }
 ');
     copy($root . '/src/opnsense/scripts/appcontrol/aliases.php', $tmp . '/aliases.php');
     file_put_contents($tmp . '/apps.py', "#!/bin/sh\necho '{\"installed\": true}'\n");
@@ -314,9 +439,12 @@ namespace { require "' . $root . '/src/opnsense/mvc/app/library/OPNsense/AppCont
     [$out, $saved] = run_script($tmp, $state, ['NAMES' => $names]);
     check(($out['status'] ?? '') === 'ok' && ($out['changes'] ?? null) === [] && ($saved['saved'] ?? 0) === 1,
         'aliases.php again, nothing changed: nothing saved');
-    [$out, $saved] = run_script($tmp, $state, ['NAMES' => $names, 'INVALID' => 'An alias with this name already exists.']);
-    check(($out['status'] ?? '') === 'failed' && in_array('aliases.alias.u1.name: An alias with this name already exists.',
-        $out['errors'] ?? [], true) && ($saved['saved'] ?? 0) === 1, 'aliases.php, the model refusing: said, nothing saved');
+    $bad = json_encode(['ttl' => 3600, 'classify' => true,
+        'aliases' => $want + ['appcontrol_bad-name' => ['description' => 'Application Control: bad-name']]]);
+    [$out, $saved] = run_script($tmp, $state, ['NAMES' => $bad]);
+    check(($out['status'] ?? '') === 'failed' && count($out['errors'] ?? []) === 1 &&
+        preg_match('/^aliases\.alias\.u\d+\.name: The name must start with a letter/', $out['errors'][0] ?? '') === 1 &&
+        ($saved['saved'] ?? 0) === 1 && count($saved['aliases'] ?? []) === 2, 'aliases.php, the model refusing a name: said, nothing saved');
     file_put_contents($state, json_encode(['aliases' => $saved['aliases']]));
     [$out, $saved] = run_script($tmp, $state, []);
     check(($out['status'] ?? '') === 'failed' && empty($saved['saved']) && count($saved['aliases']) === 2,
