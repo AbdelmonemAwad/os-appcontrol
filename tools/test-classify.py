@@ -511,7 +511,29 @@ aliases = {tables.alias_name(tables.CATEGORY_PREFIX, c): {'kind': 'category', 'n
            for c in catalogue['categories'].values()}
 aliases['appcontrol_YouTube'] = {'kind': 'application', 'name': 'YouTube'}
 aliases['appcontrol_DNS'] = {'kind': 'application', 'name': 'DNS'}
+# ifconfig -a as FreeBSD writes it: the WAN, two internal interfaces (a CARP address on one, the other
+# written /25), the loopback and a point-to-point link
+IFCONFIG_TEXT = '''em0: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\tether 02:00:00:00:00:10
+\tinet 203.0.113.2 netmask 0xffffff00 broadcast 203.0.113.255
+\tinet6 fe80::10%em0 prefixlen 64 scopeid 0x1
+em1: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\tether 02:00:00:00:00:11
+\tinet 192.0.2.1 netmask 0xffffff00 broadcast 192.0.2.255
+\tinet 192.0.2.3 netmask 0xffffff00 broadcast 192.0.2.255 vhid 1
+\tinet6 fe80::11%em1 prefixlen 64 scopeid 0x2
+\tinet6 2001:db8:1::1 prefixlen 64
+em2: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\tinet 198.51.100.129/25 broadcast 198.51.100.255
+lo0: flags=1008049<UP,LOOPBACK,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+\tinet6 ::1 prefixlen 128
+pppoe0: flags=88d1<UP,POINTOPOINT,RUNNING,NOARP,SIMPLEX,MULTICAST> metric 0 mtu 1492
+\tinet 203.0.113.50 --> 203.0.113.1 netmask 0xffffffff
+'''
+NET = classify.Network(IFCONFIG_TEXT, {'em1', 'em2'})
 state = classify.State(T0, catalogue, {'apps': ['YouTube', 'DNS', 'TLS']}, [('lan', 'em1')])
+state.network = NET
 fake = FakePf()
 counts = classify.apply(state, records, tables.Pf(run=fake), aliases, T0 + 70)
 check('into the tables: each server named by DPI and begun here, in its category\'s table and its chosen application\'s',
@@ -540,13 +562,57 @@ check('the same unknown connection again: one row, two connections', rows_u[('un
 for i in range(600):
     classify._unknown(state, 'unknown', None, 6, ('203.0.113.%d' % (i % 250), 1000 + i), '', '', 'lan', T0 + 200 + i)
 classify.apply(state, [], tables.Pf(run=fake), aliases, T0 + 900)
-check('the Unknown list: the latest 500 kept', (len(state.unknown), min(r['last'] for r in state.unknown.values())),
-      (500, T0 + 300))
+kinds = {}
+for r in state.unknown.values():
+    kinds.setdefault(r['kind'], []).append(r['last'])
+check('the Unknown list: the latest 500 of each kind kept - 600 more not named push none of the others out',
+      {k: (len(v), min(v)) for k, v in kinds.items()}, {'unknown': (500, T0 + 300), 'guess': (1, T0 + 130),
+                                                       'no_app': (1, T0 + 130)})
+check('the Unknown list as written: all of it, latest first', [r['last'] for r in state.unknown_rows()][:2] + [
+    len(state.unknown_rows())], [T0 + 799, T0 + 798, 502])
 status = state.status()
 check('status.json: what the page reads', sorted(status), sorted(['since', 'windows', 'window', 'totals', 'apps', 'last', 'error',
                                                                   'capped_windows', 'stopped', 'interfaces', 'engine']))
 check('status.json: the totals', {k: status['totals'][k] for k in ('named', 'guessed', 'unknown', 'no_app', 'added', 'refreshed')},
       {'named': 10, 'guessed': 2, 'unknown': 2, 'no_app': 2, 'added': 5, 'refreshed': 5})
+
+# never into a table: the firewall, its internal networks, an address that is no server's, ICMP
+check('ifconfig -a read: the firewall\'s own addresses, in every way ifconfig writes them', sorted(str(a) for a in NET.own),
+      sorted(['203.0.113.2', 'fe80::10', '192.0.2.1', '192.0.2.3', 'fe80::11', '2001:db8:1::1', '198.51.100.129', '127.0.0.1',
+              '::1', '203.0.113.50']))
+check('ifconfig -a read: the networks of the internal interfaces, and those alone', sorted(str(n) for n in NET.networks),
+      ['192.0.2.0/24', '198.51.100.128/25', '2001:db8:1::/64', 'fe80::/64'])
+cases = [(6, '198.51.100.10', None), (6, '203.0.113.7', None), (1, '198.51.100.10', 'icmp'), (58, '2001:db8::443', 'icmp'),
+         (17, '224.0.0.251', 'address'), (17, 'ff02::fb', 'address'), (17, '255.255.255.255', 'address'),
+         (17, '203.0.113.255', 'address'), (17, '192.0.2.255', 'address'), (6, '169.254.10.1', 'address'),
+         (6, 'fe80::2', 'address'), (6, '127.0.0.1', 'address'), (6, '::1', 'address'), (6, '0.0.0.0', 'address'),
+         (6, '::', 'address'), (6, '192.0.2.1', 'own'), (6, '192.0.2.3', 'own'), (6, '203.0.113.2', 'own'),
+         (6, '203.0.113.50', 'own'), (6, '2001:db8:1::1', 'own'), (6, '192.0.2.50', 'lan'), (6, '2001:db8:1::50', 'lan'),
+         (6, '198.51.100.130', 'lan')]
+check('why a server goes into no table: ICMP; multicast, broadcast, link-local, loopback, unspecified; the firewall\'s own; '
+      'a host of an internal network - and a server out there, or on the WAN\'s network, goes in',
+      [NET.why_not(p, s) for p, s, _ in cases], [w for _, _, w in cases])
+check('the firewall\'s addresses not read: nothing goes into a table', classify.Network('', {'em1'}).why_not(6, '198.51.100.10'),
+      'unread')
+lan_host = F(('192.0.2.50', 443), client=('203.0.113.99', 40001))
+firewall = F(('192.0.2.1', 53), client=('192.0.2.10', 40002), proto=17)
+mdns = F(('224.0.0.251', 5353), client=('192.0.2.10', 5353), proto=17)
+ping = F(('198.51.100.10', 0), client=('192.0.2.10', 0), proto=1)
+tls_midway = F(('198.51.100.21', 443), client=('192.0.2.10', 50040), started=False)
+special = [('named', 'TLS.YouTube', lan_host, row(lan_host, 'TLS.YouTube')), ('named', 'DNS', firewall, row(firewall, 'DNS')),
+           ('named', 'MDNS', mdns, row(mdns, 'MDNS')), ('named', 'ICMP', ping, row(ping, 'ICMP')),
+           ('named', 'TLS', tls_midway, row(tls_midway, 'TLS')), ('named', 'TLS', None, row(tls_midway, 'TLS'))]
+state = classify.State(T0, catalogue, {'apps': ['YouTube', 'DNS']}, [('lan', 'em1')])
+state.network = NET
+fake = FakePf()
+counts = classify.apply(state, special, tables.Pf(run=fake), aliases, T0 + 70)
+check('a LAN host, the firewall, a multicast address and ICMP, named: counted as named, in no table, the reason kept',
+      (counts['named'], counts['not_tabled'], fake.held, state.not_tabled),
+      (6, 4, {}, {'icmp': 1, 'address': 1, 'own': 1, 'lan': 1, 'unread': 0}))
+check('TLS alone, on a connection not begun here or matched by no capture: no "no application" row, not counted',
+      (counts['no_app'], [r['kind'] for r in state.unknown.values()]), (0, []))
+check('status.json: the connections named and put in no table, and why', (lambda t: (t['not_tabled'], t['not_tabled_why']['lan']))(
+    state.status()['totals']), (4, 1))
 
 # ------------------------------------------------------------- a packet the reader cannot make sense of
 pipe_r, pipe_w = os.pipe()
@@ -590,6 +656,8 @@ with tempfile.TemporaryDirectory() as tmp:
           classify.interfaces({'interfaces': []}, config), [('lan', 'em1'), ('opt3', 'em4')])
     check('chosen: those, switched on', classify.interfaces({'interfaces': ['opt4', 'opt2', 'wan']}, config),
           [('wan', 'em0'), ('opt4', 'wg0')])
+    check('the internal networks, for the tables: those of the interfaces internal by default, whatever Settings chose, '
+          'and those watched', classify.lan_devices([('opt4', 'wg0')], config), {'em1', 'em4', 'wg0'})
 
 
 # ------------------------------------------------------------- one run of the service, with stand-ins
@@ -666,6 +734,9 @@ with tempfile.TemporaryDirectory() as tmp:
                      '</general></AppControl></OPNsense></opnsense>')
     with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
         json.dump(catalogue, handle)
+    with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
+        handle.write(IFCONFIG_TEXT)
+    program(os.path.join(tmp, 'ifconfig'), '#!/bin/sh\necho "ifconfig $*" >> %s\ncat %s\n' % (calls, os.path.join(tmp, 'ifconfig.txt')))
     classify.WINDOW, classify.GRACE = 2.0, 1.0
     capture.Flows.SETTLE = 0.0
     fake = FakePf()
@@ -673,9 +744,11 @@ with tempfile.TemporaryDirectory() as tmp:
     state = classify.serve(stop_after=2, reader=os.path.join(tmp, 'ndpiReader'), tcpdump=os.path.join(tmp, 'tcpdump'),
                            pf=tables.Pf(run=fake), config=config, catalogue_path=os.path.join(tmp, 'ndpi.json'),
                            status=os.path.join(tmp, 'status.json'), unknown=os.path.join(tmp, 'unknown.json'),
-                           work=os.path.join(tmp, 'work'), refresh=False)
+                           work=os.path.join(tmp, 'work'), refresh=False, ifconfig=os.path.join(tmp, 'ifconfig'))
     took = time.time() - started
     asked = open(calls).read().splitlines()
+    check('the service: the firewall\'s addresses read at its start and again at each window\'s close',
+          [line for line in asked if line.startswith('ifconfig')], ['ifconfig -a'] * 3)
     dump = [line for line in asked if line.startswith('tcpdump')]
     check('the service: tcpdump on the internal interface alone, -p (no promiscuous port), each packet as it comes, whole, to its pipe',
           dump, ['tcpdump -p -n -U -i em1 -s 0 -w - ip or ip6'])

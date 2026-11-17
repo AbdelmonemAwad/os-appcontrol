@@ -422,7 +422,7 @@
             <tfoot></tfoot>
         </table>
         <div class="text-muted ac-note">
-            {{ lang._('Not named: nDPI could not say what a connection is. Guessed: named by port or address only. No application: nDPI named its protocol - TLS, QUIC or HTTP - and no application on top. Server name and JA4 fingerprint are what its client sent first, to tell where it comes from; JA4 is read from TLS over TCP only. Latest 500 kept.') }}
+            {{ lang._('Not named: nDPI could not say what a connection is. Guessed: named by port or address only. No application: nDPI named its protocol - TLS, QUIC or HTTP - and no application on top. Not named and No application list only connections whose beginning was seen. Server name and JA4 fingerprint are what its client sent first, to tell where it comes from; JA4 is read from TLS over TCP only. Latest 500 of each kind kept.') }}
         </div>
     </div>
     <div id="settings" class="tab-pane">

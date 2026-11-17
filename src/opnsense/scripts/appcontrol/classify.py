@@ -20,11 +20,16 @@ as it is and once with guessing off (ndpi.py), and each connection is then:
   guessed      named only with guessing on - by its port or its address: shown as a guess, never put
                in a table;
   unknown      not named at all, its beginning seen here: listed in Unknown with its server, and the
-               server name and JA4 its TLS client gave, if any. A TLS, QUIC or HTTP connection that nDPI
-               named by that protocol alone - no application on top - is listed there too.
+               server name and JA4 its TLS client gave, if any. A TLS, QUIC or HTTP connection begun
+               here that nDPI named by that protocol alone - no application on top - is listed there
+               too. Each kind keeps its latest UNKNOWN_KEEP rows.
 
 A connection whose beginning was not seen - already open when the capture began - is not judged
-unknown, and does not go into a table; one named by nDPI is counted.
+unknown, and does not go into a table; one named by nDPI is counted. Nor does a server go into a table
+that is the firewall itself or a host of its internal networks (Network, from ifconfig -a at each
+window's close), an address that is no server's - multicast, broadcast, link-local, loopback,
+unspecified - or the other end of an ICMP connection: those are counted in status.json as named and
+not put in a table, with the reason.
 
 What it found goes to /var/db/os-appcontrol: status.json (the page's cards and Applications) and
 unknown.json (the page's Unknown), written after every window. Nothing is held on the firewall: no
@@ -34,8 +39,10 @@ service goes on: it never fails its caller.
 
 import errno
 import fcntl
+import ipaddress
 import json
 import os
+import re
 import select
 import signal
 import struct
@@ -57,11 +64,12 @@ STATUS = STATE + '/status.json'
 UNKNOWN = STATE + '/unknown.json'
 CONFIG = '/conf/config.xml'
 TCPDUMP = '/usr/sbin/tcpdump'
+IFCONFIG = '/sbin/ifconfig'
 
 WINDOW = 60.0               # seconds a window gathers new connections
 GRACE = 10.0                # seconds a window stays open after it ends, for its connections' later packets
 PACKETS_PER_WINDOW = 2000000  # packets one interface is read for in a window; past it, the rest waits
-UNKNOWN_KEEP = 500          # rows the Unknown list keeps, the latest
+UNKNOWN_KEEP = 500          # rows the Unknown list keeps of each kind, the latest
 RETRY = 30.0                # seconds before a capture that stopped is started again
 
 DYNAMIC_V4 = ('dhcp', 'pppoe', 'pptp', 'l2tp', 'ppp')
@@ -121,6 +129,102 @@ def _is_address(text):
         return False
 
 
+def lan_devices(watched, path=CONFIG):
+    """The devices whose networks are the firewall's internal ones: those internal by default, whatever
+    Settings chose, and those watched."""
+    return {dev for _, dev in interfaces({'interfaces': []}, path)} | {dev for _, dev in watched}
+
+
+class Network:
+    """The firewall's own addresses, and the networks of the interfaces given - its internal ones and
+    those watched - as ifconfig -a lists them. A server nDPI named goes into no table when it is one of
+    them, when its address is no server's (multicast, broadcast, link-local, loopback, unspecified), or
+    when the connection is ICMP; and while the addresses have not been read, none does."""
+
+    REASONS = ('icmp', 'address', 'own', 'lan', 'unread')
+    HEAD = re.compile(r'^(\S+?):\s+flags=')
+    LIMITED = ipaddress.ip_address('255.255.255.255')
+
+    def __init__(self, text='', lan=()):
+        self.own, self.networks, self.broadcast = set(), set(), {self.LIMITED}
+        dev = None
+        for line in text.splitlines():
+            head = self.HEAD.match(line)
+            if head:
+                dev = head.group(1)
+                continue
+            words = line.split()
+            if dev is None or len(words) < 2 or words[0] not in ('inet', 'inet6'):
+                continue
+            found = _interface(words)
+            if found is None:
+                continue
+            self.own.add(found.ip)
+            if found.version == 4 and 'broadcast' in words[:-1]:
+                try:
+                    self.broadcast.add(ipaddress.ip_address(words[words.index('broadcast') + 1]))
+                except ValueError:
+                    pass
+            if dev in lan and found.network.prefixlen < found.max_prefixlen:
+                self.networks.add(found.network)
+                if found.version == 4 and found.network.prefixlen <= 30:
+                    self.broadcast.add(found.network.broadcast_address)
+        self.read = bool(self.own)
+
+    def why_not(self, proto, server):
+        """Why the server of a connection nDPI named goes into no table - one of REASONS - or None."""
+        if proto in (capture.ICMP, capture.ICMP6):
+            return 'icmp'
+        try:
+            address = ipaddress.ip_address(server)
+        except ValueError:
+            return 'address'
+        if (address.is_multicast or address.is_link_local or address.is_loopback or address.is_unspecified
+                or address in self.broadcast):
+            return 'address'
+        if not self.read:
+            return 'unread'
+        if address in self.own:
+            return 'own'
+        if any(address in net for net in self.networks if net.version == address.version):
+            return 'lan'
+        return None
+
+
+def _interface(words):
+    """The address and its network of one inet or inet6 line of ifconfig, in any of the ways it writes
+    them - 'inet 192.0.2.1 netmask 0xffffff00', 'inet 192.0.2.1/24', 'inet6 fe80::1%em0 prefixlen 64';
+    None for a line read as none of them."""
+    text, prefix = words[1], None
+    if '/' in text:
+        text, prefix = text.rsplit('/', 1)
+    text = text.split('%')[0]
+    for i, word in enumerate(words[2:-1], 2):
+        if word == 'netmask':
+            try:
+                mask = words[i + 1]
+                prefix = bin(int(mask, 16) if mask.startswith('0x') else int(ipaddress.IPv4Address(mask))).count('1')
+            except ValueError:
+                return None
+        elif word == 'prefixlen':
+            prefix = words[i + 1]
+    try:
+        return ipaddress.ip_interface(text if prefix is None else '%s/%s' % (text, prefix))
+    except ValueError:
+        return None
+
+
+def network(lan, before, ifconfig=IFCONFIG):
+    """The firewall's addresses read again (ifconfig -a); the last read kept when this one gives none."""
+    try:
+        done = subprocess.run([ifconfig, '-a'], capture_output=True, text=True, timeout=30)
+        text = done.stdout if done.returncode == 0 else ''
+    except (OSError, subprocess.SubprocessError):
+        text = ''
+    found = Network(text, lan)
+    return found if found.read or not before.read else before
+
+
 class State:
     """What has been found since the service started, written for the page after every window."""
 
@@ -131,7 +235,9 @@ class State:
         self.watched = watched
         self.windows = 0
         self.totals = {'flows': 0, 'named': 0, 'guessed': 0, 'unknown': 0, 'no_app': 0, 'not_judged': 0,
-                       'added': 0, 'refreshed': 0}
+                       'not_tabled': 0, 'added': 0, 'refreshed': 0}
+        self.not_tabled = dict.fromkeys(Network.REASONS, 0)
+        self.network = Network()
         self.apps = {}
         self.unknown = {}
         self.last = None
@@ -145,7 +251,8 @@ class State:
 
     def status(self, captures=()):
         return {
-            'since': self.since, 'windows': self.windows, 'window': WINDOW, 'totals': self.totals,
+            'since': self.since, 'windows': self.windows, 'window': WINDOW,
+            'totals': dict(self.totals, not_tabled_why=dict(self.not_tabled)),
             'apps': self.apps, 'last': self.last, 'error': self.error, 'capped_windows': self.capped,
             'stopped': self.stopped,
             'interfaces': [{'key': c.key, 'device': c.dev, 'capturing': c.proc is not None,
@@ -157,8 +264,8 @@ class State:
         }
 
     def unknown_rows(self):
-        rows = sorted(self.unknown.values(), key=lambda r: r['last'], reverse=True)
-        return rows[:UNKNOWN_KEEP]
+        """The Unknown list, latest first: apply() keeps each kind to its latest UNKNOWN_KEEP."""
+        return sorted(self.unknown.values(), key=lambda r: r['last'], reverse=True)
 
 
 def judge(flows, rows_any, rows_dpi):
@@ -192,12 +299,13 @@ def judge(flows, rows_any, rows_dpi):
 
 def apply(state, records, pf, aliases, now):
     """The records of a window into the state and the tables: the servers of connections nDPI named,
-    begun here, into their category's table and their chosen application's; guesses and unknown
-    connections into the Unknown list, never into a table."""
+    begun here, into their category's table and their chosen application's - unless state.network
+    says why not, which is counted; guesses and unknown connections into the Unknown list, never into
+    a table, and those named by a protocol alone when they were begun here."""
     protocols = state.catalogue.get('protocols') or {}
     chosen = set(state.conf.get('apps') or [])
     puts = {}
-    counts = {'flows': 0, 'named': 0, 'guessed': 0, 'unknown': 0, 'no_app': 0}
+    counts = {'flows': 0, 'named': 0, 'guessed': 0, 'unknown': 0, 'no_app': 0, 'not_tabled': 0}
     for kind, name, flow, row in records:
         counts['flows'] += 1
         if flow is not None:
@@ -218,7 +326,12 @@ def apply(state, records, pf, aliases, now):
             entry['last'] = now
             if master not in entry['protocols']:
                 entry['protocols'].append(master)
-            if flow is not None and flow.started:
+            begun = flow is not None and flow.started
+            why = state.network.why_not(proto, server[0]) if begun else None
+            if why:
+                counts['not_tabled'] += 1
+                state.not_tabled[why] += 1
+            elif begun:
                 targets = []
                 if category:
                     targets.append(tables.table_for_category(category, aliases))
@@ -227,7 +340,7 @@ def apply(state, records, pf, aliases, now):
                 for table in targets:
                     if table:
                         puts.setdefault(table, set()).add(server[0])
-            if ndpi.carried_only(name):
+            if begun and ndpi.carried_only(name):
                 counts['no_app'] += 1
                 _unknown(state, 'no_app', name, proto, server, server_name, ja4, iface, now)
         elif kind == 'guessed':
@@ -250,11 +363,21 @@ def apply(state, records, pf, aliases, now):
         state.totals[key] += counts[key]
     state.totals['added'] += added
     state.totals['refreshed'] += refreshed
-    if len(state.unknown) > UNKNOWN_KEEP:
-        for row in sorted(state.unknown.values(), key=lambda r: r['last'])[:len(state.unknown) - UNKNOWN_KEEP]:
-            state.unknown.pop(row['id'], None)
+    _keep_latest(state.unknown)
     counts.update({'added': added, 'refreshed': refreshed, 'tables': len(puts)})
     return counts
+
+
+def _keep_latest(rows):
+    """The Unknown list kept to the latest UNKNOWN_KEEP rows of each kind, so that many of one kind -
+    guesses, say - never push the others out."""
+    kinds = {}
+    for row in rows.values():
+        kinds.setdefault(row['kind'], []).append(row)
+    for found in kinds.values():
+        if len(found) > UNKNOWN_KEEP:
+            for row in sorted(found, key=lambda r: r['last'])[:len(found) - UNKNOWN_KEEP]:
+                rows.pop(row['id'], None)
 
 
 def _unknown(state, kind, name, proto, server, server_name, ja4, iface, now):
@@ -415,7 +538,8 @@ class Job:
 
 
 def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
-          catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True):
+          catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True,
+          ifconfig=IFCONFIG):
     """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged). The
     catalogue of the installed nDPI is read again first, so a package updated since is followed."""
     conf = tables.settings(config)
@@ -440,6 +564,18 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
         except OSError as error:
             log('Application Control: %s could not be written: %s' % (status, error))
 
+    unread = [False]
+
+    def look(t):
+        """The firewall's addresses and its internal networks, read again."""
+        state.network = network(lan_devices(watched, config), state.network, ifconfig)
+        if state.network.read:
+            unread[0] = False
+        elif not unread[0]:
+            unread[0] = True
+            state.fail('the firewall\'s own addresses could not be read (%s -a): no server goes into a table '
+                       'until they are' % ifconfig, t)
+
     if not conf['classify']:
         state.fail('classification is off in Settings')
     elif not ndpi.installed(reader):
@@ -460,6 +596,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
         if not c.start(start):
             state.fail(c.error)
     log('Application Control: classifying on %s' % ', '.join('%s (%s)' % (c.key, c.dev) for c in captures))
+    look(start)
     save(captures)
     next_close = int(start // WINDOW)
     job = None
@@ -495,6 +632,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                 if win.records and c.stream.header:
                     parts.append((c.key, c.stream.header, win))
                 c.flows.forget(t)
+            look(t)
             job = Job(next_close, parts, reader, work)
             next_close += 1
         if job is not None and (job.done() or now() - job.started > ndpi.TIMEOUT):
