@@ -190,7 +190,8 @@
         /*
          * Four cards: the applications nDPI named since the classifier started, the connections it
          * named by their packets - a guess, by port or address, is kept out of the tables - those it
-         * did not name, and the last error.
+         * did not name, and the last error, with what reading the installed nDPI's catalogue found
+         * wrong (it stays until the catalogue is read again).
          */
         function draw(data) {
             const $cards = $('#ac-cards').empty();
@@ -219,12 +220,18 @@
             $cards.append(card('', 'fa-question', "{{ lang._('Unknown') }}", count(totals.unknown),
                 count(totals.no_app) + ' ' + "{{ lang._('more named by protocol alone') }}"));
             const error = data.error || null;
-            $cards.append(card(error ? 'warn' : '', 'fa-exclamation-triangle', "{{ lang._('Last error') }}",
-                error ? when(error.at) : "{{ lang._('none') }}", error ? error.message : ''));
+            const catalogue = Array.isArray(data.catalogue_errors) ? data.catalogue_errors : [];
+            const lines = (error ? [error.message] : []).concat(catalogue);
+            $cards.append(card(lines.length ? 'warn' : '', 'fa-exclamation-triangle', "{{ lang._('Last error') }}",
+                error ? when(error.at) : (catalogue.length ? when(data.catalogue_read_at) : "{{ lang._('none') }}"),
+                lines.join(' · ')));
 
             $('#ac-project').toggle(!!data.project);
             $('#ac-pf-alone').toggle(!data.project);
             $('#ac-missing').toggle(!data.installed);
+            $('#ac-capped').text(plain(count(data.capped_windows) + ' ' +
+                "{{ lang._('windows cut short: connections past the packets, connections or bytes a window reads were not classified') }}"))
+                .toggle(data.capped_windows > 0);
             $('#ac-tables').text(count((data.tables || {}).categories) + ' ' + "{{ lang._('category tables') }}" + ' · ' +
                 count((data.tables || {}).applications) + ' ' + "{{ lang._('application tables') }}" + ' · ' +
                 count((data.tables || {}).addresses) + ' ' + "{{ lang._('addresses in pf') }}");
@@ -358,6 +365,7 @@
     <span id="ac-project" style="display: none;">{{ lang._('os-xgs-npu is installed: each connection is classified from its first packets, seen by the host before it moves into hardware.') }}</span>
     <span id="ac-pf-alone" style="display: none;">{{ lang._('pf alone holds these tables: without os-xgs-npu no hardware takes part.') }}</span>
     <span id="ac-missing" class="text-warning" style="display: none;">{{ lang._('nDPI is not installed: package ndpi is needed.') }}</span>
+    <span id="ac-capped" class="text-warning" style="display: none;"></span>
 </div>
 
 <ul class="nav nav-tabs" data-tabs="tabs" id="maintabs">

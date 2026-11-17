@@ -714,6 +714,13 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             time.sleep(5)
         return state
 
+    problem = ndpi.protocols_problem(catalogue.get('protocols') or {})
+    if problem:
+        # a category taken from a table read wrong would put servers in the wrong tables: none is taken,
+        # and the applications chosen in Settings fill theirs still
+        state.fail('the protocols of the installed nDPI cannot be believed (%s): no server goes into a category '
+                   'table' % problem, start)
+        state.catalogue = dict(catalogue, protocols={})
     captures = follow(state, [], watched, start, tcpdump)
     if not watched:
         # the interfaces are read again at each window's close: one assigned since is followed

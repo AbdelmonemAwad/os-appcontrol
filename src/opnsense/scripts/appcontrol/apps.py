@@ -68,8 +68,9 @@ def refresh(reader=ndpi.NDPIREADER, path=tables.CATALOGUE, fallback=CATEGORIES, 
         if out['installed']:
             out['errors'].append('ndpiReader -a 1 gave no category: categories.json used')
     protocols = ndpi.parse_protocols(help_text, categories) if help_text else {}
-    if out['installed'] and not protocols:
-        out['errors'].append('ndpiReader -H gave no protocol')
+    problem = ndpi.protocols_problem(protocols) if out['installed'] else None
+    if problem:
+        out['errors'].append(problem)
     found = VERSION.search(help_text)
     out.update({'categories': {str(k): v for k, v in sorted(categories.items())}, 'categories_from': source,
                 'protocols': protocols, 'reader': found.group(1) if found else None,

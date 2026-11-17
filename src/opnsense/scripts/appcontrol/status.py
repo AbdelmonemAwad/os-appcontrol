@@ -99,10 +99,11 @@ def report(status_path=STATUS, config=tables.CONFIG, catalogue_path=tables.CATAL
     return {
         'classify': conf['classify'], 'running': pid is not None, 'pid': pid, 'ttl': conf['ttl'],
         'installed': ndpi.installed(reader), 'version': catalogue.get('version'), 'reader': catalogue.get('reader'),
-        'catalogue_errors': catalogue.get('errors', []),
+        'catalogue_errors': catalogue.get('errors', []), 'catalogue_read_at': catalogue.get('read_at'),
         'since': found.get('since'), 'windows': found.get('windows', 0), 'window': found.get('window'),
         'totals': found.get('totals') or {}, 'last': found.get('last'), 'error': found.get('error'),
         'stopped': found.get('stopped'), 'capped_windows': found.get('capped_windows', 0),
+        'dropped_windows': found.get('dropped_windows', 0),
         'interfaces': found.get('interfaces') or [], 'apps': apps, 'categories': categories,
         'tables': {'categories': len(categories), 'applications': sum(1 for a in aliases.values()
                                                                        if a['kind'] == 'application'),

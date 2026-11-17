@@ -135,6 +135,11 @@ check('-H: an application, a long category', (protos.get('YouTube'), protos.get(
 check('-H: the header, Unknown (category 0) and what follows the table, a protocol-shaped line among it: not taken',
       ('Protocol' in protos, 'Unknown' in protos, 'XSS' in protos, 'After_Risks' in protos, len(protos)),
       (False, False, False, False, 16))
+check('-H believed: TLS in Web and DNS in Network', ndpi.protocols_problem(protos), None)
+check('-H not believed: empty, or TLS or DNS in another category or none - said which',
+      [ndpi.protocols_problem(p) for p in ({}, dict(protos, TLS='Media'), {k: v for k, v in protos.items() if k != 'DNS'})],
+      ['ndpiReader -H gave no protocol', 'ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web',
+       'ndpiReader -H was not read as nDPI writes it: DNS in no category, not Network'])
 
 with tempfile.TemporaryDirectory() as tmp:
     fake = os.path.join(tmp, 'ndpiReader')
@@ -151,6 +156,15 @@ with tempfile.TemporaryDirectory() as tmp:
     check('apps.py refresh: the categories from -a 1, the protocols from -H, the version from pkg',
           (out['categories_from'], len(saved['categories']), len(saved['protocols']), saved['version'], saved['reader'],
            out['errors']), ('ndpiReader -a 1', 93, 16, '6.0.d20260909,1', '6.0.0', []))
+    shifted = os.path.join(tmp, 'H.txt')
+    with open(shifted, 'w') as handle:
+        handle.write(open(os.path.join(FIX, 'ndpiReader-H.txt'), encoding='utf-8').read().replace(
+            'Safe                  Web', 'Safe                  Media', 1))
+    program(os.path.join(tmp, 'shifted'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
+            % (os.path.join(FIX, 'ndpiReader-a1.txt'), shifted))
+    out = apps.refresh(os.path.join(tmp, 'shifted'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
+    check('apps.py refresh, -H giving TLS another category: said, for the page', out['errors'],
+          ['ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web'])
     with open(fake, 'w') as handle:
         handle.write('#!/bin/sh\nexit 1\n')
     out = apps.refresh(fake, os.path.join(tmp, 'ndpi.json'), pkg=pkg)
@@ -927,12 +941,14 @@ COPY_READER = ('#!/usr/bin/env python3\nimport shutil, sys\nopen(%r, "a").write(
                'a = sys.argv\nshutil.copy(%r if "-d" in a else %r, a[a.index("-C") + 1])\n')
 
 
-def service(tmp, packets, any_rows, dpi_rows, reader=COPY_READER, stop_after=1, cat=None, more_interfaces='',
+def service(tmp, packets, any_rows, dpi_rows, reader=COPY_READER, stop_after=2, cat=None, more_interfaces='',
             timeout=40, change=None, **kwargs):
     """One run of the service with stand-ins, in tmp: tcpdump writing what the Python in packets puts in p
     (t its start, pcapgen there) and then waiting; ndpiReader (reader, %-formatted with the calls file and
-    the two CSVs) - COPY_READER copies the CSV of the run asked for; ifconfig and a stand-in pfctl. Stopped
-    after timeout s whatever happens. (state, status.json, unknown.json, the programs' calls, pfctl's tables)."""
+    the two CSVs) - COPY_READER copies the CSV of the run asked for; ifconfig and a stand-in pfctl. Two
+    windows judged by default: tcpdump's packets can fall in the window after the one the service began
+    in. Stopped after timeout s whatever happens. (state, status.json, unknown.json, the programs' calls,
+    pfctl's tables)."""
     calls = os.path.join(tmp, 'calls')
     any_csv, dpi_csv = os.path.join(tmp, 'any.csv'), os.path.join(tmp, 'dpi.csv')
     for path, pairs in ((any_csv, any_rows), (dpi_csv, dpi_rows)):
@@ -982,6 +998,13 @@ with tempfile.TemporaryDirectory() as tmp:
           'named, no table', ({k: saved['totals'][k] for k in ('named', 'unknown', 'not_judged')}, rows, held,
                               saved['error']['message']),
           ({'named': 0, 'unknown': 0, 'not_judged': 2}, [], {}, 'ndpiReader ended with status 1 on lan'))
+with tempfile.TemporaryDirectory() as tmp:
+    no_dns = dict(catalogue, protocols={k: v for k, v in catalogue['protocols'].items() if k != 'DNS'})
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, cat=no_dns)
+    check('the service, nDPI\'s protocols not to be believed: said, no category table filled, the chosen application\'s still',
+          ((saved['error'] or {}).get('message'), held, saved['engine']['protocols']),
+          ('the protocols of the installed nDPI cannot be believed (ndpiReader -H was not read as nDPI writes it: DNS in no '
+           'category, not Network): no server goes into a category table', {'appcontrol_YouTube': ['198.51.100.10']}, 0))
 
 
 # ------------------------------------------------------------------------------------------- the clock stepped
@@ -1025,7 +1048,7 @@ with tempfile.TemporaryDirectory() as tmp:
            time.time() - began < 15), (True, True, True))
 with tempfile.TemporaryDirectory() as tmp:
     began = time.time()
-    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, now=Clock(-1000, 3), timeout=15)
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, now=Clock(-1000, 3), timeout=15, stop_after=1)
     check('the clock gone back 1000 s: windows close again at once, in the clock\'s new time',
           (state.windows, state.last and state.last['window'] < int(began // classify.WINDOW)), (1, True))
 
@@ -1095,7 +1118,8 @@ with tempfile.TemporaryDirectory() as tmp:
                                         'last': T0 + 10},
                             'TLS': {'category': 'Web', 'named': 1, 'guessed': 2, 'protocols': ['TLS'], 'last': T0 + 9}}}, handle)
     with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
-        json.dump({'version': '6.0.d20260909,1', 'protocols': {'Dropbox': 'Cloud', 'YouTube': 'Media'}}, handle)
+        json.dump({'version': '6.0.d20260909,1', 'protocols': {'Dropbox': 'Cloud', 'YouTube': 'Media'}, 'read_at': T0 - 5,
+                   'errors': ['ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web']}, handle)
     pfctl = os.path.join(tmp, 'pfctl')
     # pfctl -vvs Tables, as status.py reads it: a table's flags and name, then its counters
     with open(os.path.join(tmp, 'tables.txt'), 'w') as handle:
@@ -1116,6 +1140,9 @@ with tempfile.TemporaryDirectory() as tmp:
                                                      {'categories': 1, 'applications': 1, 'addresses': 9}))
     check('status.py: no pidfile - not running; nDPI not there - said', (report['running'], report['installed'],
                                                                           report['classify']), (False, False, True))
+    check('status.py: what reading nDPI\'s catalogue found wrong, and when, for the page\'s Last error',
+          (report.get('catalogue_errors'), report.get('catalogue_read_at')),
+          (['ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web'], T0 - 5))
     with open(os.path.join(tmp, 'mine.pid'), 'w') as handle:
         handle.write(str(os.getpid()))
     check('status.py: a pidfile naming a live process that is not the classifier - not running',

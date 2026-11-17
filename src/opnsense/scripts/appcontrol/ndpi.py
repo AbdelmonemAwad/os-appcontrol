@@ -41,6 +41,10 @@ CARRIERS = ('TLS', 'QUIC', 'HTTP')
 OPTION = re.compile(r'<Option(\d+) value="(\d+)">([^<]*)</Option\d+>')
 PROTOCOL = re.compile(r'^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$')
 
+# two protocols every nDPI has, and the categories its own table gives them: a table read that says
+# otherwise was not read as nDPI writes it, and none of its categories is to be believed
+SURE = {'TLS': 'Web', 'DNS': 'Network'}
+
 
 def command(pcap, csv, guess=True, reader=NDPIREADER):
     """The ndpiReader run over one window's file; with guess False, DPI alone (-d)."""
@@ -169,6 +173,18 @@ def parse_protocols(text, categories):
                 out[found.group(3)] = word
                 break
     return out
+
+
+def protocols_problem(protocols):
+    """Why the table of protocols read from -H is not to be believed - empty, or TLS not in Web or DNS
+    not in Network - or None."""
+    if not protocols:
+        return 'ndpiReader -H gave no protocol'
+    wrong = ['%s in %s, not %s' % (name, protocols.get(name) or 'no category', category)
+             for name, category in sorted(SURE.items()) if protocols.get(name) != category]
+    if wrong:
+        return 'ndpiReader -H was not read as nDPI writes it: %s' % '; '.join(wrong)
+    return None
 
 
 def run_text(args, timeout=60):

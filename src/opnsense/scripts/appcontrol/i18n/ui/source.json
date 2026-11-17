@@ -153,5 +153,6 @@
  "off",
  "os-xgs-npu is installed: each connection is classified from its first packets, seen by the host before it moves into hardware.",
  "pf alone holds these tables: without os-xgs-npu no hardware takes part.",
- "since"
+ "since",
+ "windows cut short: connections past the packets, connections or bytes a window reads were not classified"
 ]
