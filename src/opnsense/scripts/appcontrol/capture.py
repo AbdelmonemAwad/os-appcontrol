@@ -16,9 +16,13 @@ looking at a connection after its first 8 packets anyway (--cfg=NULL,packets_lim
 enough for every flow in phase 0's lab).
 
 The server of a connection is the end its SYN went to, or for a connection with no SYN seen, the end
-its first packet went to. A TLS client's first bytes are put together from its first segments and
-read as a ClientHello: the server name (SNI), the first ALPN and the JA4 fingerprint, as FoxIO's JA4
-specification defines it. QUIC's ClientHello is encrypted and is not read here.
+its first packet went to. A SYN on two ends already followed begins a new connection when the old one
+ended (FIN or RST) or its window is closed: a port used again is judged again. A connection without
+SYN - UDP, ICMP - heard from again after it was forgotten as idle is one that was going, not one begun.
+A TLS client's first bytes are put together from its first segments and read as a ClientHello: the
+server name (SNI), the first ALPN and the JA4 fingerprint, as FoxIO's JA4 specification defines it.
+What was put together is let go once the connection has its KEEP packets or its window closes. QUIC's
+ClientHello is encrypted and is not read here.
 
 Nothing here runs a program or touches the firewall: classify.py does that.
 """
@@ -32,7 +36,7 @@ MAX_RECORD = 262144             # the largest packet tcpdump writes with -s 0
 HELLO_MAX = 16389               # a ClientHello in one TLS record: 5 bytes of header and 16 KiB
 
 TCP, UDP, ICMP, ICMP6 = 6, 17, 1, 58
-SYN, ACK = 0x02, 0x10
+FIN, SYN, RST, ACK = 0x01, 0x02, 0x04, 0x10
 
 # pcap link types tcpdump writes for the interfaces a firewall has: Ethernet (VLAN interfaces too,
 # their tag already taken off), the BSD loopback and tunnels (a 4-byte address family first), raw IP
@@ -215,8 +219,8 @@ def flow_key(proto, a, a_port, b, b_port):
 
 class Flow:
     __slots__ = ('key', 'proto', 'client', 'server', 'started', 'first', 'last', 'packets', 'bytes',
-                 'window', 'kept', 'keep', 'iface', 'client_raw', 'syn_seq', 'segments', 'hello_done',
-                 'sni', 'alpn', 'ja4')
+                 'window', 'kept', 'keep', 'cut', 'ended', 'iface', 'client_raw', 'syn_seq', 'segments',
+                 'hello_done', 'sni', 'alpn', 'ja4')
 
     def __init__(self, proto, client, server, started, ts, window, iface, client_raw, keep):
         self.proto = proto
@@ -228,6 +232,8 @@ class Flow:
         self.window = window
         self.kept = 0
         self.keep = keep
+        self.cut = False                        # its window's bytes ran out before its KEEP packets were kept
+        self.ended = False                      # a FIN or an RST was seen
         self.iface = iface
         self.client_raw = client_raw            # (raw address, port), to tell which way a packet goes
         self.syn_seq = None
@@ -260,7 +266,9 @@ class Flows:
 
     SETTLE = 2.0
     IDLE = 180.0                # a connection not heard from this long is forgotten
+    GONE = 3600.0               # how long the ends of a forgotten connection without SYN are remembered
     MAX_FLOWS = 300000          # connections remembered at once
+    MAX_GONE = 100000           # forgotten connections without SYN remembered at once
     MAX_WINDOW_FLOWS = 100000   # connections begun in one window that are followed
     MAX_WINDOW_BYTES = 32 << 20  # what one window keeps, in bytes
 
@@ -270,6 +278,7 @@ class Flows:
         self.since = since
         self.table = {}
         self.windows = {}
+        self.gone = {}                  # hash of the ends of a connection without SYN forgotten -> when
         self.closed_until = None        # windows up to this index are closed
         self.packets = 0
         self.late = 0                   # packets of a window already closed when they were read
@@ -280,7 +289,8 @@ class Flows:
         return int(ts // self.seconds)
 
     def packet(self, linktype, ts, record, size):
-        """Take one packet: follow its connection, keep it while the connection has fewer than KEEP."""
+        """Take one packet: follow its connection, keep it while the connection has fewer than KEEP and
+        its window has bytes left."""
         self.packets += 1
         d = decode(linktype, record)
         if d is None:
@@ -290,6 +300,11 @@ class Flows:
         one, two = (src, sport), (dst, dport)
         key = (proto,) + (one + two if one <= two else two + one)
         flow = self.table.get(key)
+        if flow is not None and proto == TCP and flags & SYN and not flags & ACK and (
+                flow.ended or (self.closed_until is not None and flow.window <= self.closed_until)):
+            # the same two ends begin again - the old connection ended, or was judged with its window:
+            # a new connection, judged on its own
+            flow = None
         if flow is None:
             index = self.window_of(ts)
             if self.closed_until is not None and index <= self.closed_until:
@@ -315,7 +330,10 @@ class Flows:
                 started = True
             else:
                 client, server = (src, sport), (dst, dport)
-                started = proto != TCP and ts - self.since >= self.SETTLE
+                # without a SYN, begun here only when it was not going already: not in the capture's
+                # first seconds, and not a connection forgotten as idle and now heard from again
+                started = (proto != TCP and ts - self.since >= self.SETTLE
+                           and self.gone.pop(hash(key), None) is None)
             flow = Flow(proto, (address(client[0]), client[1]), (address(server[0]), server[1]), started,
                         ts, index, self.iface, client, keep)
             self.table[key] = flow
@@ -324,9 +342,18 @@ class Flows:
         flow.packets += 1
         flow.bytes += size
         flow.last = ts
+        if proto == TCP and flags & (FIN | RST):
+            flow.ended = True
         if flow.keep and flow.kept < KEEP:
             win = self.windows.get(flow.window)
             if win is None:
+                return
+            if win.kept_bytes + len(record) > self.MAX_WINDOW_BYTES:
+                # the window's bytes are spent: this connection keeps nothing more, and what it kept
+                # is judged only if nDPI names it from that
+                win.capped = True
+                flow.keep, flow.cut = False, True
+                _hello_drop(flow)
                 return
             win.records.append(record)
             win.kept_bytes += len(record)
@@ -336,26 +363,45 @@ class Flows:
                     flow.syn_seq = seq
                 elif end > start:
                     _hello_segment(flow, seq, record[start:end])
+            if flow.kept >= KEEP:
+                _hello_drop(flow)
 
     def close(self, index):
-        """The window, closed: no packet is kept in it after this. An earlier window still open - a
-        clock set back - is closed with it, and what it kept dropped."""
+        """The window, closed: no packet is kept in it after this, and what its connections' ClientHellos
+        put together so far is let go. An earlier window still open - a clock set back - is closed with
+        it, and what it kept dropped."""
         if self.closed_until is None or index > self.closed_until:
             self.closed_until = index
         found = Window(index)
         for i in sorted(i for i in self.windows if i <= index):
             win = self.windows.pop(i)
+            for flow in win.flows:
+                _hello_drop(flow)
             if i == index:
                 found = win
         return found
 
     def forget(self, now):
-        """Connections not heard from for IDLE seconds; how many."""
+        """Connections not heard from for IDLE seconds; how many. The ends of one without SYN are
+        remembered for GONE seconds, MAX_GONE of them at most: heard from again, it is one that was
+        going, not one begun."""
         idle = now - self.IDLE
         gone = [k for k, f in self.table.items() if f.last < idle]
         for k in gone:
-            del self.table[k]
+            if self.table.pop(k).proto != TCP:
+                self.gone[hash(k)] = now
+        horizon = now - self.GONE
+        if self.gone and (len(self.gone) > self.MAX_GONE or next(iter(self.gone.values())) < horizon):
+            # in the order they were forgotten: the oldest first
+            kept = [(k, t) for k, t in self.gone.items() if t >= horizon]
+            self.gone = dict(kept[-self.MAX_GONE:])
         return len(gone)
+
+
+def _hello_drop(flow):
+    """What a ClientHello put together so far, let go: nothing more of it is read."""
+    flow.segments = None
+    flow.hello_done = True
 
 
 def _hello_segment(flow, seq, payload):

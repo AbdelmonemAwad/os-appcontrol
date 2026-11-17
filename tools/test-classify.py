@@ -391,6 +391,80 @@ with tempfile.TemporaryDirectory() as tmp:
           [r for _, r, _ in again.feed(open(path, 'rb').read())], [r for _, r, _ in got[:2]])
 
 
+def feed(flows, packets):
+    stream, got = stream_of(packets)
+    for ts, rec, wire in got:
+        flows.packet(stream.linktype, ts, rec, wire)
+
+
+def only(flows):
+    return list(flows.table.values())[0]
+
+
+# a window's bytes, checked before each packet is kept: a UDP record here is 16 + 42 + 200 bytes
+fl = capture.Flows('lan', 60, T0)
+fl.MAX_WINDOW_BYTES = 600
+feed(fl, [(T0 + 70 + i * 0.01, pcapgen.frame('192.0.2.10', '198.51.100.30', 17, pcapgen.udp(40000, 9000, b'b' * 200)))
+          for i in range(6)])
+w, f = fl.windows[fl.window_of(T0 + 70)], only(fl)
+check('a window\'s bytes checked before each packet: never past them, the window marked, the connection cut and counted',
+      (w.kept_bytes <= 600, len(w.records), w.capped, f.keep, f.cut, f.kept, f.packets), (True, 2, True, False, True, 2, 6))
+check('a connection cut short that nDPI did not name: not judged, not called unknown', classify.judge({f.key: f}, {}, {}),
+      ([], 1))
+cut_row = {'proto': 17, 'src': '192.0.2.10', 'sport': 40000, 'dst': '198.51.100.30', 'dport': 9000, 'name': 'IPsec',
+           'by_ip': '', 'server_name': '', 'packets': 2}
+check('a connection cut short that nDPI named from what it kept: named', [r[0] for r in classify.judge(
+    {f.key: f}, {f.key: cut_row}, {f.key: cut_row})[0]], ['named'])
+
+# what a ClientHello put together, let go: at the connection's 16th packet, and when its window closes
+f = only(one(pcapgen.tcp_connection(T0 + 3, '192.0.2.10', 50020, '198.51.100.10', 443, hello, mss=100)))
+check('a ClientHello longer than 16 packets: what was put together let go at the 16th, no JA4',
+      (f.kept, f.segments, f.hello_done, f.ja4), (16, None, True, None))
+fl = one(pcapgen.tcp_connection(T0 + 4, '192.0.2.10', 50021, '198.51.100.10', 443, hello)[:4])
+f = only(fl)
+waiting = f.segments is not None
+fl.close(fl.window_of(T0 + 4))
+check('a ClientHello not whole when its window closes: let go then', (waiting, f.segments, f.hello_done), (True, None, True))
+
+# the same two ends again
+fl = capture.Flows('lan', 60, T0)
+feed(fl, pcapgen.tcp_connection(T0 + 5, '192.0.2.10', 50030, '198.51.100.10', 443, data=b'a' * 10))
+old = only(fl)
+fl.close(fl.window_of(T0 + 5))
+feed(fl, pcapgen.tcp_connection(T0 + 65, '192.0.2.10', 50030, '198.51.100.10', 443, data=b'b' * 10))
+new = only(fl)
+check('a SYN on the same ends, the old connection\'s window closed: a new connection, begun, in the window it began in',
+      (new is not old, new.started, new.window, [x is new for x in getattr(fl.windows.get(fl.window_of(T0 + 65)), 'flows', [])]),
+      (True, True, fl.window_of(T0 + 65), [True]))
+fl.close(fl.window_of(T0 + 65))
+synack = pcapgen.frame('198.51.100.10', '192.0.2.10', 6, pcapgen.tcp(443, 50030, 50000, 1001, 0x12), to_server=False)
+feed(fl, [(T0 + 125, synack)])
+check('a SYN and ACK sent again by the server after its window closed: no new connection', only(fl) is new, True)
+fl = capture.Flows('lan', 60, T0)
+fin = [(T0 + 10.5, pcapgen.frame('192.0.2.10', '198.51.100.10', 6, pcapgen.tcp(50031, 80, 2000, 50001, 0x11)))]
+feed(fl, pcapgen.tcp_connection(T0 + 10, '192.0.2.10', 50031, '198.51.100.10', 80, data=b'x') + fin)
+old = only(fl)
+feed(fl, pcapgen.tcp_connection(T0 + 11, '192.0.2.10', 50031, '198.51.100.10', 80, data=b'y'))
+check('a FIN seen, then a SYN on the same ends in the same window: a new connection', (old.ended, only(fl) is not old,
+                                                                                      only(fl).started), (True, True, True))
+fl = capture.Flows('lan', 60, T0)
+syn = pcapgen.frame('192.0.2.10', '198.51.100.10', 6, pcapgen.tcp(50032, 443, 1000, 0, 0x02))
+feed(fl, [(T0 + 12, syn), (T0 + 13, syn)])
+check('a SYN sent again, its connection open in its window: the same connection', (len(fl.table), only(fl).packets), (1, 2))
+fl = capture.Flows('lan', 60, T0)
+udp_k = pcapgen.frame('192.0.2.10', '198.51.100.40', 17, pcapgen.udp(40001, 4500, b'k'))
+feed(fl, [(T0 + 20, udp_k)])
+first = only(fl)
+fl.forget(T0 + 20 + 181)
+feed(fl, [(T0 + 220, udp_k)])
+check('a UDP connection forgotten as idle, heard from again: not taken as begun here', (first.started, only(fl) is not first,
+                                                                                      only(fl).started), (True, True, False))
+fl.forget(T0 + 220 + 181)
+fl.forget(T0 + 220 + 181 + 3601)
+feed(fl, [(T0 + 220 + 181 + 3602, udp_k)])
+check('the same ends an hour after they were forgotten: a connection begun', (only(fl).started, len(fl.gone)), (True, 0))
+
+
 # ------------------------------------------------------------------- judged, and what follows from it
 class F:
     """A connection as capture.Flow gives it, for the records."""
@@ -398,6 +472,7 @@ class F:
     def __init__(self, server, started=True, sni=None, ja4=None, proto=6, client=('192.0.2.10', 50000), iface='lan'):
         self.server, self.client, self.started, self.sni, self.ja4, self.proto, self.iface = (
             server, client, started, sni, ja4, proto, iface)
+        self.cut = False
         self.key = capture.flow_key(proto, client[0], client[1], server[0], server[1])
 
 

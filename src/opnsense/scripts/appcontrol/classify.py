@@ -164,7 +164,9 @@ class State:
 def judge(flows, rows_any, rows_dpi):
     """[record] of one window: each connection begun in it (capture.Flow, by key) against the two CSVs,
     and the rows nDPI named that no capture matched - its keys and ours did not meet - with their ends
-    from the row. A record: kind (named, guessed, unknown), nDPI's name, the flow or None, the row."""
+    from the row. A record: kind (named, guessed, unknown), nDPI's name, the flow or None, the row.
+    A connection nDPI did not name is unknown only when its beginning was seen here and its first
+    packets were all kept; else it is counted, not judged."""
     out = []
     rows_dpi = dict(rows_dpi)
     rows_any = dict(rows_any)
@@ -176,7 +178,7 @@ def judge(flows, rows_any, rows_dpi):
             out.append(('named', dpi['name'], flow, dpi))
         elif any_row is not None:
             out.append(('guessed', any_row['name'], flow, any_row))
-        elif flow.started:
+        elif flow.started and not flow.cut:
             out.append(('unknown', None, flow, None))
         else:
             not_judged += 1
