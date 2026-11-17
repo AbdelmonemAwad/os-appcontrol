@@ -23,8 +23,8 @@ Knowing which application a connection belongs to - with the open nDPI library -
 >
 > **Written, not released (2026-11-17).** The first part is here: each connection's application named
 > by nDPI, on by default, and pf tables of the servers named - one for every nDPI category, one for each
-> application chosen. Nothing is blocked yet. Nothing of it has run on an appliance yet: what was run is
-> under [What is tested](#what-is-tested).
+> application chosen. Nothing is blocked yet. It has run on the second XGS 3300, the XGS 136 and a plain
+> OPNsense: what was run is under [What is tested](#what-is-tested).
 
 <p align="center"><b>Contents:</b> <a href="#what-it-does">What it does</a> &middot; <a href="#how-a-connection-is-named">How a connection is named</a> &middot; <a href="#not-yet-and-why">Not yet, and why</a> &middot; <a href="#what-is-tested">What is tested</a> &middot; <a href="#installation">Installation</a> &middot; <a href="#updates">Updates</a> &middot; <a href="#where-it-fits">Where it fits</a> &middot; <a href="#licence">Licence</a></p>
 
@@ -115,14 +115,16 @@ into hardware on its own schedule, and the service classifies what the host saw 
 
 ## Not yet, and why
 
-- **anything on an appliance** - this branch was built and tested away from one (below). Not run yet:
-  on the second XGS 3300, the XGS 136, a plain OPNsense; the page in a browser; `install.sh` and
-  `uninstall.sh` on a firewall; the tmpfs mounted by FreeBSD's own `mount`; the classifier's cost on a
-  host's processors and memory, its tables filling, an address expiring.
-- **`ndpiReader -H` and `-a 1` read on a box** - their format here is the source's (nDPI's commit
-  de5c784, the package's): `ndpi_dump_protocols()` and `ndpi_generate_options()`. Phase 0 ran both
-  options on an XGS 3300 but did not keep their output. If `-a 1` gives nothing, `categories.json`,
-  nDPI's categories as that commit names them, stands in; `apps.py check` says how the two differ.
+- **the page in a browser, an address expiring, beyond 1 Gbit/s** - the plugin has run on the second
+  XGS 3300, the XGS 136 and a plain OPNsense (below), driven from the shell through the calls the page
+  makes; the page itself has not been opened in a browser. An address leaving its table at its Expire,
+  the tables over a day, and the cost above the 941 Mbit/s the lab carried are not measured.
+- **`ndpiReader -H` and `-a 1` as other nDPI builds write them** - their format here is the source's
+  (nDPI's commit de5c784, the package's): `ndpi_dump_protocols()` and `ndpi_generate_options()`. Those
+  of ndpi-6.0.d20260909,1 were read on the three systems below: 99 categories, so `-a 1`'s
+  (`categories.json` has 93), and the table of protocols believed - its servers went into Web, Cloud,
+  Media and Network. If `-a 1` gives nothing, `categories.json`, nDPI's categories as that commit names
+  them, stands in; `apps.py check` says how the two differ.
 - **a category given by a host name** - nDPI can give a connection a category of its own from its host
   list; the table here is its application's category from `-H`. How often the two differ is not
   measured. Each connection's own category, which `ndpiReader -K json` gives, is phase 2's.
@@ -137,13 +139,14 @@ into hardware on its own schedule, and the service classifies what the host saw 
 - **Suricata rules, routing by gateway** - phases 3 and 4.
 - **at line rate** - the service reads at most 2,000,000 packets an interface in a window - the rest
   waits - and follows at most 100,000 connections begun in one window, keeping 32 MiB of their packets;
-  the page says how many windows were cut short. Neither the cost nor the rate it holds is measured.
+  the page says how many windows were cut short. Its cost was measured at 941 Mbit/s (below); the rate
+  it holds beyond that was not.
 
 ## What is tested
 
 On 2026-11-17, from this branch, away from an appliance - the checks, run under Python 3.14 and PHP 8.5:
 
-- **the classifier** - `tools/test-classify.py`, 156 checks:
+- **the classifier** - `tools/test-classify.py`, 157 checks:
   - ndpiReader's CSV as phase 0's lab read it on an XGS 3300 with ndpi-6.0.d20260909,1
     (`tools/fixtures/lab-*.csv`, every address made a documentation one): the connections and names
     the lab counted - TLS.Wikipedia, TLS.Cloudflare and TLS.Mozilla 11 each and DNS 8, TLS.YouTube 12
@@ -198,11 +201,11 @@ On 2026-11-17, from this branch, away from an appliance - the checks, run under 
   of the plugin's taken out, switched off instead where a rule or XGS: Settings still names it;
   `aliases.php` saving only after a clean validation, and touching nothing when the names cannot be
   read, `tables.py` fails or the model refuses a name;
-- **the page's API** - `tools/test-mvc.php`, 17 checks, with stand-ins for OPNsense's MVC base: the
+- **the page's API** - `tools/test-mvc.php`, 18 checks, with stand-ins for OPNsense's MVC base: the
   status passed on and an answer it cannot read said, the grids' rows, and Apply's order - the aliases,
   the filter, cron, the tables of aliases gone, the classifier started again or stopped when off -
-  with nothing done after aliases not written but the classifier stopped when off, and nothing for a
-  GET;
+  with the tables taken out passed on to the page, nothing done after aliases not written but the
+  classifier stopped when off, and nothing for a GET;
 - **the installation** - `tools/test-install.py`, 37 checks: `install/install.sh`,
   `install/uninstall.sh`, the package's `post-install.sh`, `pre-deinstall.sh` and `post-deinstall.sh`,
   `place-menu.sh` and the rc script, in a temporary root with stand-ins for `service`, `configctl`,
@@ -216,7 +219,7 @@ On 2026-11-17, from this branch, away from an appliance - the checks, run under 
 - **the self-update** - `tools/test-self-update.py`, 45 checks, as os-blocklists has it;
 - **the strings** - `tools/check-strings.py`: each of the 156 strings the GUI shows is in `source.json`,
   nDPI's 93 category names among them through the page's map (`tools/gen-data-strings.py`); 38 had
-  their Arabic in opnsense-arabic that day, and the other 118 wait for it;
+  their Arabic in opnsense-arabic already, and the other 118 are in its pull request 80, merged first;
 - **the rest of the checks** - every installed file removed by the uninstaller
   (`tools/check-uninstall.sh`), `php -l`, `py_compile` and pyflakes, `sh -n`, XML and JSON, nothing
   private, no Arabic in the code, the copyright line; and, by hand, the page kit and the page's script
@@ -237,7 +240,44 @@ interface's runs begun at once, a clock step not seen, the interfaces read once,
 written outside memory, a protocol table not believed used all the same, Apply leaving the classifier
 running when off and an alias the model refuses saved - and the tests failed on each.
 
-Not tested: anything on an appliance (above).
+On the appliances and a plain OPNsense, the same day, from this branch at f782d49, as a user meets it:
+`install/install.sh`, the classifier's first windows, the page's Apply with classifying off and then on
+(set through the model, then the calls Apply makes, in its order), and `install/uninstall.sh`:
+
+- **the second XGS 3300** (OPNsense 26.7.9_1, os-xgs-npu installed) - `install.sh` ended 0 in 6 s and
+  installed `ndpi-6.0.d20260909,1` itself; XGS: Application Control; the window files on a tmpfs. The
+  bench machine's traffic through F2 for 75 s (HTTPS, HTTP, DNS): after two windows, of 94 connections
+  88 named and 6 guessed, 5 named by their protocol alone; 18 servers in the category tables; the
+  firewall's own addresses (4), addresses that are no server's (15) and a LAN host (1) kept out; 99
+  category tables, their 99 aliases External with Expire 3600
+  ([photograph](docs/images/measurements/phase1-install-2026-11-17.png));
+- **its cost** - four TCP streams through F2 for 40 s, the CPU time taken over 30 s: with os-xgs-npu's
+  flow maker on (a connection in hardware after its first packets), 940 Mbit/s, `tcpdump` 0.3% and the
+  classifier 2.4% of one core, the box 99% idle; with it off (every packet through the host), 941
+  Mbit/s, 6.8% and 62.9%, 85% idle; 29 MB resident; no window cut short
+  ([photograph](docs/images/measurements/phase1-cost-2026-11-17.png));
+- **Apply and the removal** - off: the classifier stopped, its 99 aliases out of Firewall: Aliases, its
+  99 tables out of pf; on: all back; `uninstall.sh` ended 0 in 4 s: no file of the plugin under
+  /usr/local, `/var/db/os-appcontrol` gone, `ndpi` removed, no tmpfs, no table, no alias, config.xml as
+  before but for the saves' stamps and the plugin's own settings
+  ([photograph](docs/images/measurements/phase1-cycle-2026-11-17.png));
+- **the XGS 136** (OPNsense 26.7.9_1) - `install.sh` 0 in 8 s, `ndpi` installed by it, XGS: Application
+  Control; no lab traffic through it: its own interfaces' 29 connections all named and none in a table -
+  its own addresses (12) and addresses that are no server's (15); Apply off and on, and `uninstall.sh` 0
+  in 4 s, nothing left ([install](docs/images/measurements/phase1-136-install-2026-11-17.png),
+  [Apply and removal](docs/images/measurements/phase1-136-cycle-2026-11-17.png));
+- **a plain OPNsense** (26.7.7, the nano image in qemu, no os-xgs-npu) - `install.sh` 0 in 10 s, `ndpi`
+  installed by it, Firewall: Application Control, the window files on a tmpfs; nothing through it to
+  classify; Apply off and on, and `uninstall.sh` 0 in 8 s, nothing left
+  ([install](docs/images/measurements/phase1-plain-vm-install-2026-11-17.png),
+  [Apply and removal](docs/images/measurements/phase1-plain-vm-cycle-2026-11-17.png)).
+
+Found by the first run on the 3300 and fixed in this branch: the tables of aliases gone were only
+emptied, so 99 stayed listed in pf after Apply off and after the removal, until the next boot. They are
+taken out now, by Apply, `uninstall.sh` and the package's `post-deinstall.sh`, and the runs above found
+none left.
+
+Not tested: the page in a browser, an address expiring, beyond 1 Gbit/s (above).
 
 ## Installation
 
