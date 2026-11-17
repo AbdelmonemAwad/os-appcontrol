@@ -59,6 +59,16 @@ def program(path, text):
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def mounted(tmp, lines=None):
+    """A stand-in mount: mount -p listing tmp/work as a tmpfs, or the lines given."""
+    table = os.path.join(tmp, 'mounts.txt')
+    with open(table, 'w') as handle:
+        handle.write(''.join(line + '\n' for line in (lines if lines is not None else [
+            'tmpfs %s tmpfs rw,size=167772160,mode=0750 0 0' % os.path.join(tmp, 'work')])))
+    program(os.path.join(tmp, 'mount'), '#!/bin/sh\n[ "$1" = -p ] && cat %s\n' % table)
+    return os.path.join(tmp, 'mount')
+
+
 def labels(rows):
     out = {}
     for row in rows.values():
@@ -711,6 +721,20 @@ with tempfile.TemporaryDirectory() as tmp:
         classify.log = real_log
 
 
+# ------------------------------------------------------------- the window files' directory, in memory
+with tempfile.TemporaryDirectory() as tmp:
+    work = os.path.join(tmp, 'work')
+    os.makedirs(work)
+    tables_seen = [(['/dev/ada0p2 / ufs rw 1 1', 'tmpfs %s tmpfs rw,size=167772160,mode=0750 0 0' % work], True),
+                   (['/dev/md3 %s ufs rw 0 0' % work], True),
+                   (['/dev/ada0p2 / ufs rw 1 1'], False),
+                   (['tmpfs %s tmpfs rw 0 0' % work, '/dev/ada0p3 %s ufs rw 0 0' % work], False)]
+    check('the work directory in memory: a tmpfs or an md(4) there; not when nothing is mounted there, or a disk on top',
+          [classify.in_memory(work, mounted(tmp, lines)) for lines, _ in tables_seen], [want for _, want in tables_seen])
+    check('the work directory, mount not to be run: not taken as in memory', classify.in_memory(work, os.path.join(tmp, 'none')),
+          False)
+
+
 # ------------------------------------------------------------- one run of the service, with stand-ins
 HEADER = open(os.path.join(FIX, 'lab-update.csv'), encoding='utf-8').readline()
 
@@ -789,7 +813,8 @@ with tempfile.TemporaryDirectory() as tmp:
     state = classify.serve(stop_after=2, reader=os.path.join(tmp, 'ndpiReader'), tcpdump=os.path.join(tmp, 'tcpdump'),
                            pf=tables.Pf(run=fake), config=config, catalogue_path=os.path.join(tmp, 'ndpi.json'),
                            status=os.path.join(tmp, 'status.json'), unknown=os.path.join(tmp, 'unknown.json'),
-                           work=os.path.join(tmp, 'work'), refresh=False, ifconfig=os.path.join(tmp, 'ifconfig'))
+                           work=os.path.join(tmp, 'work'), refresh=False, ifconfig=os.path.join(tmp, 'ifconfig'),
+                           mount=mounted(tmp))
     took = time.time() - started
     asked = open(calls).read().splitlines()
     check('the service: the firewall\'s addresses read at its start and again at each window\'s close',
@@ -928,6 +953,8 @@ def service(tmp, packets, any_rows, dpi_rows, reader=COPY_READER, stop_after=1, 
     with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
         json.dump(cat or catalogue, handle)
     fake = FakePf()
+    if 'mount' not in kwargs:
+        kwargs['mount'] = mounted(tmp)
     timer = threading.Timer(timeout, lambda: setattr(classify, 'running', False))
     timer.start()
     try:
@@ -1106,6 +1133,13 @@ with tempfile.TemporaryDirectory() as tmp:
     saved = json.load(open(os.path.join(tmp, 'status.json')))
     check('nDPI not installed: the service waits, and says so in status.json', 'nDPI is not installed' in saved['error']['message'],
           True)
+with tempfile.TemporaryDirectory() as tmp:
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, mount=mounted(tmp, ['/dev/ada0p2 / ufs rw 1 1']))
+    check('the work directory not in memory: no capture started, no window written, and why said in status.json',
+          ((saved['error'] or {}).get('message'), [line for line in asked if line.startswith(('tcpdump', 'ndpiReader'))],
+           os.listdir(os.path.join(tmp, 'work'))),
+          ('%s is not in memory - the rc script mounts a tmpfs there: no window is written to the disk, so nothing is classified'
+           % os.path.join(tmp, 'work'), [], []))
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)

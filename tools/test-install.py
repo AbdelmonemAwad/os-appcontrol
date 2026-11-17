@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
-"""The installer, the removal, the package's three scripts and place-menu.sh, run in a temporary root.
+"""The installer, the removal, the package's three scripts, place-menu.sh and the rc script, run in a
+temporary root.
 
 As os-trafficpriority's test: the scripts are run with sh from a copy of the repository in which their
 absolute paths are moved into the temporary root - /usr/local, /var/db/os-appcontrol, /var/run, PHP's
-/var/lib/php/tmp, the caches in /tmp, /conf/config.xml, /sbin/pfctl, /bin/pkill - and stand-ins
-answer for what only a firewall has: service, configctl, pkg, pfctl and pkill, each writing down how
-it was called (pkill kills nothing here). Two things FreeBSD does otherwise are bridged in the copy:
-BSD's `cp -R dir/` copies what dir holds, written `dir/.` for GNU's cp; BSD's `mktemp -t prefix` takes
-a prefix, which a stand-in gives GNU's mktemp; and install's -o root -g wheel, which a test run by
-anyone cannot take, is left out by a stand-in.
+/var/lib/php/tmp, the caches in /tmp, /conf/config.xml, /sbin/pfctl, /bin/pkill, /sbin/mount,
+/sbin/umount, /usr/sbin/daemon, /etc/rc.subr - and stand-ins answer for what only a firewall has:
+service, configctl, pkg, pfctl, pkill, mount, umount, daemon and rc.subr, each writing down how it was
+called (pkill kills nothing here; mount and umount keep a table of their own). Two things FreeBSD does
+otherwise are bridged in the copy: BSD's `cp -R dir/` copies what dir holds, written `dir/.` for GNU's
+cp; BSD's `mktemp -t prefix` takes a prefix, which a stand-in gives GNU's mktemp; and install's -o root
+-g wheel, which a test run by anyone cannot take, is left out by a stand-in.
 
 What is checked is what the scripts do: which files are laid down with which modes, where the menu
 goes, that nothing is copied when a file has a syntax error, the package ndpi installed when it is
 not there and removed only when the installer installed it and nothing needs it, the aliases made
-and the classifier started (on by default) or stopped (off in Settings), the classifier stopped and
-the aliases taken out before the files go, the tables of aliases gone emptied, nothing of the plugin
-left, and nothing done by the old package's pre-deinstall in an upgrade.
+and the classifier started (on by default) or stopped (off in Settings), the window files' tmpfs
+mounted at the classifier's start and taken down at its stop, the classifier stopped and the aliases
+taken out before the files go, the tmpfs taken down by every removal, the tables of aliases gone
+emptied, nothing of the plugin left, and nothing done by the old package's pre-deinstall in an upgrade.
 
     python3 tools/test-install.py"""
 import os
@@ -27,17 +30,23 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = ['install/install.sh', 'install/uninstall.sh', 'install/enable.sh', 'pkg/post-install.sh',
            'pkg/pre-deinstall.sh', 'pkg/post-deinstall.sh', 'src/opnsense/scripts/appcontrol/place-menu.sh',
-           'src/opnsense/scripts/appcontrol/tables.py']
+           'src/opnsense/scripts/appcontrol/tables.py', 'src/etc/rc.d/appcontrol']
 LOCAL = '/usr/local'
 MENU = '/usr/local/opnsense/mvc/app/models/OPNsense/AppControl/Menu/Menu.xml'
 XGS = '/usr/local/opnsense/mvc/app/models/OPNsense/XGS/Menu/Menu.xml'
 HOOK = '/usr/local/etc/inc/plugins.inc.d/appcontrol.inc'
 RC = '/usr/local/etc/rc.d/appcontrol'
 STATE = '/var/db/os-appcontrol'
+WORK = STATE + '/work'
+# rc.subr as far as rc.d/appcontrol asks it
+RC_SUBR = ('load_rc_config() { :; }\nwarn() { echo "${name}: WARNING: $*" >&2; }\n'
+           'run_rc_command() {\n\tcase "$1" in\n\t*start) ${start_cmd} ;;\n\t*stop) ${stop_cmd} ;;\n'
+           '\t*status) ${status_cmd} ;;\n\tesac\n}\n')
 CACHES = ['/var/lib/php/tmp/opnsense_menu_cache.xml', '/var/lib/php/tmp/opnsense_acl_cache.json',
           '/tmp/opnsense_menu_cache.xml', '/tmp/opnsense_acl_cache.json']
 COMMIT = '0123456789abcdef0123456789abcdef01234567'
@@ -79,7 +88,8 @@ class Box:
             text = open(path, encoding='utf-8').read()
             # a path where one starts, not one inside another (/var/lib/php/tmp/ holds /tmp/ too)
             text = re.sub(r'(?<![\w/.-])(/usr/local/|/var/lib/php/tmp/|/tmp/opnsense_|/sbin/pfctl|/var/db/os-appcontrol|'
-                          r'/var/run/appcontrol|/conf/config\.xml|/bin/pkill)',
+                          r'/var/run/appcontrol|/conf/config\.xml|/bin/pkill|/sbin/u?mount\b|/usr/sbin/daemon\b|'
+                          r'/etc/rc\.subr)',
                           lambda m: self.fake + m.group(1), text)
             text = text.replace('cp -R "${HERE}/src/" ', 'cp -R "${HERE}/src/." ')
             with open(path, 'w', encoding='utf-8', newline='\n') as handle:
@@ -104,6 +114,16 @@ class Box:
                    'case "$*" in "-v -s Tables") cat %s 2>/dev/null ;; esac\n' % (log, self.tables), 0o755)
         os.makedirs(self.fake + '/bin')
         self.write(self.fake + '/bin/pkill', '#!/bin/sh\necho "pkill $*" >> %s\nexit 1\n' % log, 0o755)
+        # mount -p lists the table kept here; mount -t ... adds its last argument, umount takes it out
+        self.mounts = os.path.join(tmp, 'mounts')
+        self.write(self.mounts, '')
+        self.write(self.fake + '/sbin/mount', '#!/bin/sh\n[ "$1" = -p ] && exec cat %s\necho "mount $*" >> %s\n'
+                   'for a; do d=$a; done\necho "tmpfs $d tmpfs rw 0 0" >> %s\n' % (self.mounts, log, self.mounts), 0o755)
+        self.write(self.fake + '/sbin/umount', '#!/bin/sh\necho "umount $*" >> %s\nfor a; do d=$a; done\n'
+                   'grep -q " $d " %s || exit 1\ngrep -v " $d " %s > %s.new; mv %s.new %s\n'
+                   % (log, self.mounts, self.mounts, self.mounts, self.mounts, self.mounts), 0o755)
+        self.write(self.fake + '/usr/sbin/daemon', '#!/bin/sh\necho "daemon $*" >> %s\n' % log, 0o755)
+        self.write(self.fake + '/etc/rc.subr', RC_SUBR)
         os.makedirs(self.fake + '/conf')
         self.config(ON)
 
@@ -125,11 +145,13 @@ class Box:
         os.chmod(path, mode)
 
     def run(self, script, *args, env=None):
+        return self.sh(os.path.join(self.repo, script), *args, env=env)
+
+    def sh(self, path, *args, env=None):
         environ = dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get('PATH', ''),
                        TMPDIR=os.path.dirname(self.fake))
         environ.update(env or {})
-        done = subprocess.run(['sh', os.path.join(self.repo, script)] + list(args), env=environ,
-                              capture_output=True, text=True, timeout=300)
+        done = subprocess.run(['sh', path] + list(args), env=environ, capture_output=True, text=True, timeout=300)
         return done.returncode, done.stdout + done.stderr
 
     def called(self, prefix=''):
@@ -259,6 +281,34 @@ with tempfile.TemporaryDirectory() as tmp:
     check('install.sh again: ndpi there before, so not marked as installed by it',
           os.path.exists(box.fake + '/usr/local/share/os-appcontrol/ndpi-installed'), False)
 
+    # the rc script, as installed: the window files' tmpfs mounted at the start, once, taken down at the stop
+    work, run_dir = box.fake + WORK, box.fake + '/var/run'
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onestart')
+    check('rc.d/appcontrol onestart: a tmpfs of 160m mounted on the work directory, then the classifier started',
+          (rc, box.called(), os.path.isdir(work)),
+          (0, ['mount -t tmpfs -o size=160m,mode=0750 tmpfs %s' % work,
+               'daemon -f -R 10 -t appcontrol -P %s/appcontrol.daemon.pid -p %s/appcontrol.pid '
+               '%s/usr/local/opnsense/scripts/appcontrol/classify.py run' % (run_dir, run_dir, box.fake)], True))
+    box.forget()
+    box.sh(box.fake + RC, 'onestart')
+    check('rc.d/appcontrol onestart, the tmpfs there already: not mounted over it', box.called('mount'), [])
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onestop')
+    check('rc.d/appcontrol onestop, nothing running: the tmpfs taken down', (rc, box.called(), open(box.mounts).read(),
+                                                                             out.strip()),
+          (0, ['umount %s' % work], '', 'appcontrol is not running.'))
+    box.sh(box.fake + RC, 'onestart')
+    # daemon(8) supervising the classifier, as ps shows it
+    daemon = subprocess.Popen(['daemon: appcontrol[1]', '60'], executable=shutil.which('sleep'))
+    threading.Thread(target=daemon.wait, daemon=True).start()
+    box.write(run_dir + '/appcontrol.daemon.pid', str(daemon.pid))
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onestop')
+    check('rc.d/appcontrol onestop, the classifier running: stopped, then the tmpfs taken down',
+          (rc, daemon.poll() is not None, box.called(), open(box.mounts).read(), os.path.exists(run_dir + '/appcontrol.daemon.pid')),
+          (0, True, ['umount %s' % work], '', False))
+
     # uninstall.sh: the classifier and the aliases first, then the files; ndpi left, not installed by it
     os.remove(box.fake + XGS)
     box.write(box.fake + RC, '#!/bin/sh\necho "rc.d appcontrol $* hook=$([ -f %s ] && echo yes || echo no)" >> %s\n'
@@ -276,6 +326,8 @@ with tempfile.TemporaryDirectory() as tmp:
           calls[:4], ['rc.d appcontrol onestop hook=yes', 'pkill -f daemon: [a]ppcontrol\\[',
                       'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake, 'configctl appcontrol remove hook=yes'])
     check('uninstall.sh: nothing of the plugin left - files, state, pidfiles', box.plugin_files(), [])
+    check('uninstall.sh: the window files\' tmpfs taken down, should the rc script not have', box.called('umount'),
+          ['umount -f %s' % (box.fake + WORK)])
     check('uninstall.sh: then configd, the filter and cron, without the hook',
           [c for c in calls if c.startswith(('service', 'configctl filter', 'configctl cron'))],
           ['service configd restart', 'configctl filter reload skip_alias hook=no', 'configctl cron restart hook=no'])
@@ -339,9 +391,9 @@ with tempfile.TemporaryDirectory() as tmp:
     rc, out = box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': 'true'})
     check('pre-deinstall.sh in an upgrade: nothing done', (rc, box.called()), (0, []))
     rc, out = box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': ''})
-    check('pre-deinstall.sh in a removal: the classifier stopped, then the aliases taken out', box.called(),
+    check('pre-deinstall.sh in a removal: the classifier stopped, its tmpfs taken down, then the aliases taken out', box.called(),
           ['rc.d appcontrol onestop', 'pkill -f daemon: [a]ppcontrol\\[', 'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake,
-           'configctl appcontrol remove hook=yes'])
+           'umount -f %s' % (box.fake + WORK), 'configctl appcontrol remove hook=yes'])
     os.makedirs(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__', exist_ok=True)
     box.write(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__/classify.cpython-311.pyc', 'x')
     for path in source_files():
@@ -355,6 +407,8 @@ with tempfile.TemporaryDirectory() as tmp:
           box.called('service') + [c for c in box.called('configctl')] + box.called('pfctl -t'),
           ['service configd restart', 'configctl filter reload skip_alias hook=no', 'configctl cron restart hook=no',
            'pfctl -t appcontrol_cat_Gone -T flush', 'pfctl -t appcontrol_cat_Web -T flush'])
+    check('post-deinstall.sh: the window files\' tmpfs taken down before the state goes', box.called('umount'),
+          ['umount -f %s' % (box.fake + WORK)])
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)

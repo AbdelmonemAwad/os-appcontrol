@@ -63,12 +63,13 @@ import ndpi                                                              # noqa:
 import tables                                                            # noqa: E402
 
 STATE = '/var/db/os-appcontrol'
-WORK = STATE + '/work'
+WORK = STATE + '/work'      # a tmpfs rc.d/appcontrol mounts: a window's files never go to the disk
 STATUS = STATE + '/status.json'
 UNKNOWN = STATE + '/unknown.json'
 CONFIG = '/conf/config.xml'
 TCPDUMP = '/usr/sbin/tcpdump'
 IFCONFIG = '/sbin/ifconfig'
+MOUNT = '/sbin/mount'
 
 WINDOW = 60.0               # seconds a window gathers new connections
 GRACE = 10.0                # seconds a window stays open after it ends, for its connections' later packets
@@ -220,6 +221,22 @@ def _interface(words):
         return ipaddress.ip_interface(text if prefix is None else '%s/%s' % (text, prefix))
     except ValueError:
         return None
+
+
+def in_memory(path, mount=MOUNT):
+    """True when path is where a file system in memory is mounted - tmpfs, or md(4)'s - as mount -p
+    lists the mounts, the one on top last."""
+    try:
+        done = subprocess.run([mount, '-p'], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    paths = {os.path.normpath(path), os.path.realpath(path)}
+    found = False
+    for line in done.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] in paths:
+            found = parts[2] in ('tmpfs', 'mfs') or parts[0].startswith('/dev/md')
+    return found
 
 
 def network(lan, before, ifconfig=IFCONFIG):
@@ -644,7 +661,7 @@ class Job:
 
 def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
           catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True,
-          ifconfig=IFCONFIG):
+          ifconfig=IFCONFIG, mount=MOUNT):
     """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged). The
     catalogue of the installed nDPI is read again first, so a package updated since is followed."""
     conf = tables.settings(config)
@@ -687,6 +704,9 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
         state.fail('nDPI is not installed: %s is missing (pkg install ndpi)' % reader)
     elif not catalogue.get('categories'):
         state.fail('the categories of the installed nDPI are not read yet (apps.py refresh)')
+    elif not in_memory(work, mount):
+        state.fail('%s is not in memory - the rc script mounts a tmpfs there: no window is written to the disk, so '
+                   'nothing is classified' % work)
     if state.error is not None:
         # nothing to do until Settings or the package change; the service stays, and says why
         save([])

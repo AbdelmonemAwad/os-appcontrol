@@ -21,6 +21,8 @@ fi
 # matching the shell that runs this text
 /bin/pkill -f 'daemon: [a]ppcontrol\[' 2> /dev/null || true
 /bin/pkill -f '/usr/local/opnsense/scripts/[a]ppcontrol/' 2> /dev/null || true
+# the tmpfs of the window files, should the rc script not have taken it down
+/sbin/umount -f /var/db/os-appcontrol/work 2> /dev/null || true
 
 if [ -f /usr/local/sbin/configctl ]; then
 	/usr/local/sbin/configctl appcontrol remove > /dev/null 2>&1 || true

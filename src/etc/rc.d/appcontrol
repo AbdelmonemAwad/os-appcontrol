@@ -17,6 +17,13 @@
 # rc.subr is given no pidfile and no procname: the process daemon(8) runs is python, and a procname
 # would match a sibling plugin's python too. What is running is read from the two pidfiles here,
 # and believed only when the process behind each is ours.
+#
+# A window's files - the packets kept for ndpiReader and its two CSVs - are written to a tmpfs
+# mounted here at the start and taken down at the stop, never to the disk. classify.py writes one
+# interface's at a time: at most 32 MiB of packets (capture.py's MAX_WINDOW_BYTES) and two CSVs of
+# at most 100,000 rows (MAX_WINDOW_FLOWS) of some 450 bytes, about 120 MB together; 160m is that
+# with room left, and a tmpfs takes memory only for what is in it. Without it the classifier
+# writes nothing, and says why.
 
 . /etc/rc.subr
 
@@ -26,10 +33,12 @@ rcvar=appcontrol_enable
 load_rc_config $name
 
 : ${appcontrol_enable:="NO"}
+: ${appcontrol_work_size:="160m"}
 
 appcontrol_script="/usr/local/opnsense/scripts/appcontrol/classify.py"
 appcontrol_pid="/var/run/appcontrol.pid"
 appcontrol_super="/var/run/appcontrol.daemon.pid"
+appcontrol_work="/var/db/os-appcontrol/work"
 
 start_cmd="appcontrol_start"
 stop_cmd="appcontrol_stop"
@@ -54,6 +63,31 @@ appcontrol_pidof()
 	return 0
 }
 
+# Whether the tmpfs is there: mount -p lists each mount point second.
+appcontrol_mounted()
+{
+	/sbin/mount -p | awk -v d="${appcontrol_work}" '$2 == d { m = 1 } END { exit !m }'
+}
+
+appcontrol_mount()
+{
+	install -d -o root -g wheel -m 0750 "${appcontrol_work}" || return 1
+	appcontrol_mounted && return 0
+	/sbin/mount -t tmpfs -o "size=${appcontrol_work_size},mode=0750" tmpfs "${appcontrol_work}"
+}
+
+# Once the classifier is gone; a tmpfs mounted twice over is taken down twice.
+appcontrol_unmount()
+{
+	local _n
+
+	_n=0
+	while [ ${_n} -lt 3 ] && appcontrol_mounted; do
+		/sbin/umount "${appcontrol_work}" 2> /dev/null || /sbin/umount -f "${appcontrol_work}" 2> /dev/null
+		_n=$((_n + 1))
+	done
+}
+
 appcontrol_start()
 {
 	local _pid
@@ -69,6 +103,7 @@ appcontrol_start()
 		return 1
 	fi
 	install -d -o root -g wheel -m 0750 /var/db/os-appcontrol || return 1
+	appcontrol_mount || warn "${name}: no tmpfs at ${appcontrol_work}: the classifier writes nothing, and says why"
 	echo "Starting ${name}."
 	/usr/sbin/daemon -f -R 10 -t "${name}" -P "${appcontrol_super}" -p "${appcontrol_pid}" \
 	    "${appcontrol_script}" run
@@ -81,6 +116,7 @@ appcontrol_stop()
 	_super=$(appcontrol_pidof "${appcontrol_super}")
 	_pid=$(appcontrol_pidof "${appcontrol_pid}")
 	if [ -z "${_super}${_pid}" ]; then
+		appcontrol_unmount
 		echo "${name} is not running."
 		return 0
 	fi
@@ -103,6 +139,7 @@ appcontrol_stop()
 		_waited=$((_waited + 1))
 	done
 	rm -f "${appcontrol_pid}" "${appcontrol_super}"
+	appcontrol_unmount
 	return 0
 }
 

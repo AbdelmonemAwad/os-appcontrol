@@ -26,8 +26,9 @@ rmdir /usr/local/opnsense/mvc/app/models/OPNsense/AppControl/Menu /usr/local/opn
 rm -f /var/lib/php/tmp/opnsense_menu_cache.xml /tmp/opnsense_menu_cache.xml
 
 # Nor what Python compiles beside a script it imports, which would keep the scripts' directory, nor
-# what the classifier kept, nor its pidfiles if it had to be killed; the plugin's directories go once
-# empty.
+# what the classifier kept - its tmpfs taken down first, if it is still there - nor its pidfiles if it
+# had to be killed; the plugin's directories go once empty.
+/sbin/umount -f /var/db/os-appcontrol/work 2> /dev/null || true
 rm -rf /usr/local/opnsense/scripts/appcontrol/__pycache__ /var/db/os-appcontrol
 rm -f /var/run/appcontrol.pid /var/run/appcontrol.daemon.pid
 for d in /usr/local/opnsense/scripts/appcontrol /usr/local/opnsense/mvc/app/library/OPNsense/AppControl; do

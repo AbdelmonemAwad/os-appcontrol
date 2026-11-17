@@ -32,7 +32,9 @@ rm -rf /usr/local/opnsense/mvc/app/models/OPNsense/AppControl
 rm -rf /usr/local/opnsense/mvc/app/controllers/OPNsense/AppControl
 rm -rf /usr/local/opnsense/mvc/app/views/OPNsense/AppControl
 rm -rf /usr/local/opnsense/mvc/app/library/OPNsense/AppControl
-# what the classifier kept, and its pidfiles if it had to be killed
+# what the classifier kept, and its pidfiles if it had to be killed; the tmpfs of its window files
+# first, should the rc script not have taken it down
+/sbin/umount -f /var/db/os-appcontrol/work 2> /dev/null || true
 rm -rf /var/db/os-appcontrol
 rm -f /var/run/appcontrol.pid /var/run/appcontrol.daemon.pid
 service configd restart > /dev/null
