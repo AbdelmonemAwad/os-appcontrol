@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
-"""What the classifier reads - nDPI's answers and the packets themselves - and its tables, with
-stand-ins for what only a firewall has: ndpiReader and pfctl.
+"""The classifier, run with stand-ins for what only a firewall has: ndpiReader, tcpdump and pfctl.
 
 - ndpiReader's CSV as phase 0's lab read it on an XGS 3300 (OPNsense 26.7.9, ndpi-6.0.d20260909,1):
   tools/fixtures/lab-*.csv are those files with every address made a documentation one; the rows
@@ -13,13 +12,18 @@ stand-ins for what only a firewall has: ndpiReader and pfctl.
   the JA4 of FoxIO's own example.
 - tables.py: the alias names and the 31-character rule, the tables the settings ask for, and an
   address added when new and refreshed when seen again.
+- classify.py: each connection named, guessed or unknown, what goes into a table and what never
+  does, the Unknown list kept to its latest 500, status.json - and one whole run of the service, its
+  tcpdump and ndpiReader stand-in programs, that ends when it is asked to.
 
     python3 tools/test-classify.py"""
 import json
 import os
+import stat
 import struct
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -33,6 +37,7 @@ import capture                                                           # noqa:
 import ndpi                                                              # noqa: E402
 import tables                                                            # noqa: E402
 import apps                                                              # noqa: E402
+import classify                                                          # noqa: E402
 
 failures = 0
 checks = 0
@@ -386,6 +391,303 @@ with tempfile.TemporaryDirectory() as tmp:
           [r for _, r, _ in again.feed(open(path, 'rb').read())], [r for _, r, _ in got[:2]])
 
 
+# ------------------------------------------------------------------- judged, and what follows from it
+class F:
+    """A connection as capture.Flow gives it, for the records."""
+
+    def __init__(self, server, started=True, sni=None, ja4=None, proto=6, client=('192.0.2.10', 50000), iface='lan'):
+        self.server, self.client, self.started, self.sni, self.ja4, self.proto, self.iface = (
+            server, client, started, sni, ja4, proto, iface)
+        self.key = capture.flow_key(proto, client[0], client[1], server[0], server[1])
+
+
+def row(flow, name, server_name=''):
+    return {'proto': flow.proto, 'src': flow.client[0], 'sport': flow.client[1], 'dst': flow.server[0],
+            'dport': flow.server[1], 'name': name, 'by_ip': '', 'server_name': server_name, 'packets': 8}
+
+
+named = F(('198.51.100.10', 443), sni='www.youtube.com', ja4=pcapgen.CHROME_JA4)
+plain_tls = F(('198.51.100.20', 443), client=('192.0.2.10', 50002), sni='api.example.com', ja4=pcapgen.CHROME_JA4)
+dns_flow = F(('198.51.100.53', 53), client=('192.0.2.10', 53000), proto=17)
+guessed = F(('203.0.113.7', 443), client=('192.0.2.10', 50005))
+unknown = F(('203.0.113.5', 5201), client=('192.0.2.10', 50004))
+midway = F(('203.0.113.9', 8080), client=('192.0.2.10', 50006), started=False)
+mid_named = F(('203.0.113.10', 80), client=('192.0.2.10', 50011), started=False)
+flows = {f.key: f for f in (named, plain_tls, dns_flow, guessed, unknown, midway, mid_named)}
+rows_dpi = {named.key: row(named, 'TLS.YouTube', 'www.youtube.com'), plain_tls.key: row(plain_tls, 'TLS', 'api.example.com'),
+            dns_flow.key: row(dns_flow, 'DNS', 'www.example.com'), mid_named.key: row(mid_named, 'HTTP.Canonical')}
+rows_any = dict(rows_dpi)
+rows_any[guessed.key] = row(guessed, 'TLS')
+orphan = F(('203.0.113.20', 443), client=('192.0.2.30', 40000))
+rows_dpi[orphan.key] = rows_any[orphan.key] = row(orphan, 'TLS.NetFlix')
+records, not_judged = classify.judge(flows, rows_any, rows_dpi)
+check('judged: named by DPI, guessed only with guessing on, unknown when begun here and named in neither',
+      sorted((r[0], r[1]) for r in records),
+      sorted([('named', 'TLS.YouTube'), ('named', 'TLS'), ('named', 'DNS'), ('guessed', 'TLS'), ('unknown', None),
+              ('named', 'HTTP.Canonical'), ('named', 'TLS.NetFlix')]))
+check('a connection not begun here and named by neither run: not judged', not_judged, 1)
+check('a row no capture matched: named all the same, its ends from the row', [r[2] for r in records if r[1] == 'TLS.NetFlix'],
+      [None])
+
+catalogue = {'categories': {'5': 'Web', '14': 'Network', '1': 'Media', '26': 'Video', '19': 'SoftwareUpdate'},
+             'protocols': {'YouTube': 'Media', 'TLS': 'Web', 'DNS': 'Network', 'NetFlix': 'Video',
+                           'Canonical': 'SoftwareUpdate', 'HTTP': 'Web'}}
+aliases = {tables.alias_name(tables.CATEGORY_PREFIX, c): {'kind': 'category', 'name': c}
+           for c in catalogue['categories'].values()}
+aliases['appcontrol_YouTube'] = {'kind': 'application', 'name': 'YouTube'}
+aliases['appcontrol_DNS'] = {'kind': 'application', 'name': 'DNS'}
+state = classify.State(T0, catalogue, {'apps': ['YouTube', 'DNS', 'TLS']}, [('lan', 'em1')])
+fake = FakePf()
+counts = classify.apply(state, records, tables.Pf(run=fake), aliases, T0 + 70)
+check('into the tables: each server named by DPI and begun here, in its category\'s table and its chosen application\'s',
+      {t: sorted(a) for t, a in fake.held.items()},
+      {'appcontrol_cat_Media': ['198.51.100.10'], 'appcontrol_YouTube': ['198.51.100.10'],
+       'appcontrol_cat_Web': ['198.51.100.20'], 'appcontrol_cat_Network': ['198.51.100.53'],
+       'appcontrol_DNS': ['198.51.100.53']})
+check('never into a table: a guess, an unknown connection, one not begun here, one no capture matched',
+      any(a in v for v in fake.held.values() for a in ('203.0.113.7', '203.0.113.5', '203.0.113.10', '203.0.113.20')), False)
+check('TLS chosen, but no table of it in config.xml: none written', 'appcontrol_TLS' in fake.held, False)
+check('the counts of the window', {k: counts[k] for k in ('flows', 'named', 'guessed', 'unknown', 'no_app', 'added')},
+      {'flows': 7, 'named': 5, 'guessed': 1, 'unknown': 1, 'no_app': 1, 'added': 5})
+rows_u = {(r['kind'], r['server']): r for r in state.unknown.values()}
+check('the Unknown list: not named, guessed (with nDPI\'s guess), and TLS alone (with its server name and JA4)',
+      sorted(rows_u), sorted([('unknown', '203.0.113.5'), ('guess', '203.0.113.7'), ('no_app', '198.51.100.20')]))
+check('Unknown: TLS alone keeps what its client sent first', (rows_u[('no_app', '198.51.100.20')]['server_name'],
+                                                              rows_u[('no_app', '198.51.100.20')]['ja4']),
+      ('api.example.com', pcapgen.CHROME_JA4))
+check('Unknown: a guess keeps nDPI\'s guess', rows_u[('guess', '203.0.113.7')]['name'], 'TLS')
+check('Applications: YouTube named once, its category, carried by TLS', (lambda a: (a['named'], a['category'], a['protocols']))(
+    state.apps['YouTube']), (1, 'Media', ['TLS']))
+check('Applications: TLS named once and guessed once', (state.apps['TLS']['named'], state.apps['TLS']['guessed']), (1, 1))
+counts = classify.apply(state, records, tables.Pf(run=fake), aliases, T0 + 130)
+check('the same servers again: refreshed, not added', (counts['added'], counts['refreshed']), (0, 5))
+check('the same unknown connection again: one row, two connections', rows_u[('unknown', '203.0.113.5')]['connections'], 2)
+for i in range(600):
+    classify._unknown(state, 'unknown', None, 6, ('203.0.113.%d' % (i % 250), 1000 + i), '', '', 'lan', T0 + 200 + i)
+classify.apply(state, [], tables.Pf(run=fake), aliases, T0 + 900)
+check('the Unknown list: the latest 500 kept', (len(state.unknown), min(r['last'] for r in state.unknown.values())),
+      (500, T0 + 300))
+status = state.status()
+check('status.json: what the page reads', sorted(status), sorted(['since', 'windows', 'window', 'totals', 'apps', 'last', 'error',
+                                                                  'capped_windows', 'stopped', 'interfaces', 'engine']))
+check('status.json: the totals', {k: status['totals'][k] for k in ('named', 'guessed', 'unknown', 'no_app', 'added', 'refreshed')},
+      {'named': 10, 'guessed': 2, 'unknown': 2, 'no_app': 2, 'added': 5, 'refreshed': 5})
+
+# ------------------------------------------------------------- a packet the reader cannot make sense of
+pipe_r, pipe_w = os.pipe()
+reader = classify.Capture('lan', 'em1', T0)
+reader.proc = type('Proc', (), {'stdout': os.fdopen(pipe_r, 'rb')})()
+os.write(pipe_w, pcapgen.capture(dns))
+os.close(pipe_w)
+real_decode = capture.decode
+
+
+def broken(linktype, record):
+    raise IndexError('a packet like no other')
+
+
+capture.decode = broken
+try:
+    alive = reader.read(T0 + 6)
+finally:
+    capture.decode = real_decode
+check('a packet the reader cannot make sense of: counted, and the capture goes on', (alive, reader.flows.unread), (True, 2))
+reader.proc.stdout.close()
+
+
+# ------------------------------------------------------------------------------- the interfaces watched
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><interfaces>'
+                     '<wan><enable>1</enable><if>em0</if><ipaddr>203.0.113.2</ipaddr></wan>'
+                     '<lan><enable>1</enable><if>em1</if><ipaddr>192.168.1.1</ipaddr></lan>'
+                     '<opt6><enable>1</enable><if>em6</if><ipaddr>dhcp</ipaddr></opt6>'
+                     '<opt1><enable>1</enable><if>em2</if><ipaddr>10.0.0.1</ipaddr><gateway>GW2</gateway></opt1>'
+                     '<opt2><if>em3</if><ipaddr>172.16.0.1</ipaddr></opt2>'
+                     '<opt3><enable>1</enable><if>em4</if><ipaddr>none</ipaddr><ipaddrv6>track6</ipaddrv6></opt3>'
+                     '<opt4><enable>1</enable><if>wg0</if><ipaddr>none</ipaddr></opt4>'
+                     '<opt5><enable>1</enable><if>em5</if><ipaddrv6>dhcp6</ipaddrv6><ipaddr>192.0.2.1</ipaddr></opt5>'
+                     '<lo0><internal_dynamic>1</internal_dynamic><enable>1</enable><if>lo0</if><ipaddr>127.0.0.1</ipaddr></lo0>'
+                     '</interfaces></opnsense>')
+    check('none chosen: the internal ones - not the WAN, static or not; no gateway; switched on; an address of its own, '
+          'not from upstream',
+          classify.interfaces({'interfaces': []}, config), [('lan', 'em1'), ('opt3', 'em4')])
+    check('chosen: those, switched on', classify.interfaces({'interfaces': ['opt4', 'opt2', 'wan']}, config),
+          [('wan', 'em0'), ('opt4', 'wg0')])
+
+
+# ------------------------------------------------------------- one run of the service, with stand-ins
+def program(path, text):
+    with open(path, 'w') as handle:
+        handle.write(text)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+HEADER = open(os.path.join(FIX, 'lab-update.csv'), encoding='utf-8').readline()
+
+
+def csv_rows(pairs):
+    """The CSV ndpiReader writes, with the lab's header: a row for each (flow, name), the columns not
+    read here left empty."""
+    head = HEADER.lstrip('#').rstrip('\n').split('|')
+    out = [HEADER.rstrip('\n')]
+    for i, (fl, name, sni) in enumerate(pairs):
+        cells = [''] * len(head)
+        for k, v in (('flow_id', i), ('protocol', fl[0]), ('src_ip', fl[1]), ('src_port', fl[2]), ('dst_ip', fl[3]),
+                     ('dst_port', fl[4]), ('ndpi_proto', name), ('server_name_sni', sni), ('c_to_s_pkts', 4),
+                     ('s_to_c_pkts', 4), ('proto_by_ip', 'Unknown')):
+            cells[head.index(k)] = str(v)
+        out.append('|'.join(cells))
+    return '\n'.join(out) + '\n'
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    named_flow = (6, '192.0.2.10', 50001, '198.51.100.10', 443)
+    tls_only = (6, '192.0.2.10', 50002, '198.51.100.20', 443)
+    dns_one = (17, '192.0.2.10', 53000, '198.51.100.53', 53)
+    guess_one = (6, '192.0.2.10', 50005, '203.0.113.7', 443)
+    v6_one = (6, '2001:db8::10', 50007, '2001:db8::443', 443)
+    with open(os.path.join(tmp, 'any.csv'), 'w') as handle:
+        handle.write(csv_rows([(named_flow, 'TLS.YouTube', 'www.example.com'), (tls_only, 'TLS', 'www.example.com'),
+                               (dns_one, 'DNS', 'www.example.com'), (guess_one, 'TLS', ''),
+                               (v6_one, 'TLS.NetFlix', 'www.example.com')]))
+    with open(os.path.join(tmp, 'dpi.csv'), 'w') as handle:
+        handle.write(csv_rows([(named_flow, 'TLS.YouTube', 'www.example.com'), (tls_only, 'TLS', 'www.example.com'),
+                               (dns_one, 'DNS', 'www.example.com'), (v6_one, 'TLS.NetFlix', 'www.example.com')]))
+    calls = os.path.join(tmp, 'calls')
+    # ndpiReader: the CSV of the run asked for, and how it was asked
+    program(os.path.join(tmp, 'ndpiReader'), '#!/usr/bin/env python3\nimport shutil, sys\n'
+            'open(%r, "a").write("ndpiReader " + " ".join(sys.argv[1:]) + "\\n")\n'
+            'a = sys.argv\ncsv = a[a.index("-C") + 1]\n'
+            'shutil.copy(%r if "-d" in a else %r, csv)\n'
+            % (calls, os.path.join(tmp, 'dpi.csv'), os.path.join(tmp, 'any.csv')))
+    # tcpdump: a capture of these connections, stamped now, written to the pipe; then it waits
+    program(os.path.join(tmp, 'tcpdump'), '#!/usr/bin/env python3\nimport os, sys, time\nsys.path.insert(0, %r)\n'
+            'import pcapgen\n'
+            'open(%r, "a").write("tcpdump " + " ".join(sys.argv[1:]) + "\\n")\n'
+            'open(%r, "w").write(str(os.getpid()))\n'
+            't = time.time()\nhello = pcapgen.client_hello(padding=1700)\n'
+            'p = pcapgen.tcp_connection(t, "192.0.2.10", 50001, "198.51.100.10", 443, hello)\n'
+            'p += pcapgen.tcp_connection(t, "192.0.2.10", 50002, "198.51.100.20", 443, pcapgen.client_hello(sni="api.example.com"))\n'
+            'p += [(t, pcapgen.frame("192.0.2.10", "198.51.100.53", 17, pcapgen.udp(53000, 53, pcapgen.dns_query())))]\n'
+            'p += pcapgen.tcp_connection(t, "192.0.2.10", 50004, "203.0.113.5", 5201, data=b"z" * 300)\n'
+            'p += pcapgen.tcp_connection(t, "192.0.2.10", 50005, "203.0.113.7", 443, data=b"\\x00" * 64)\n'
+            'p += pcapgen.tcp_connection(t, "192.0.2.10", 50006, "203.0.113.9", 8080, syn=False, data=b"m" * 64)\n'
+            'p += pcapgen.tcp_connection(t, "2001:db8::10", 50007, "2001:db8::443", 443, hello)\n'
+            'sys.stdout.buffer.write(pcapgen.capture(p))\nsys.stdout.buffer.flush()\n'
+            'while True:\n    time.sleep(1)\n' % (HERE, calls, os.path.join(tmp, 'tcpdump.pid')))
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><interfaces><lan><enable>1</enable><if>em1</if><ipaddr>192.0.2.1</ipaddr></lan>'
+                     '<wan><enable>1</enable><if>em0</if><ipaddr>dhcp</ipaddr></wan></interfaces>'
+                     '<OPNsense><Firewall><Alias><aliases>' + ''.join(
+                         '<alias><enabled>1</enabled><name>%s</name><type>external</type><description>Application Control: %s'
+                         '</description></alias>' % (n, d) for n, d in (
+                             ('appcontrol_cat_Media', 'category Media'), ('appcontrol_cat_Web', 'category Web'),
+                             ('appcontrol_cat_Network', 'category Network'), ('appcontrol_cat_Video', 'category Video'),
+                             ('appcontrol_YouTube', 'YouTube'))) +
+                     '</aliases></Alias></Firewall><AppControl><general><classify>1</classify><apps>YouTube</apps>'
+                     '</general></AppControl></OPNsense></opnsense>')
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump(catalogue, handle)
+    classify.WINDOW, classify.GRACE = 2.0, 1.0
+    capture.Flows.SETTLE = 0.0
+    fake = FakePf()
+    started = time.time()
+    state = classify.serve(stop_after=2, reader=os.path.join(tmp, 'ndpiReader'), tcpdump=os.path.join(tmp, 'tcpdump'),
+                           pf=tables.Pf(run=fake), config=config, catalogue_path=os.path.join(tmp, 'ndpi.json'),
+                           status=os.path.join(tmp, 'status.json'), unknown=os.path.join(tmp, 'unknown.json'),
+                           work=os.path.join(tmp, 'work'), refresh=False)
+    took = time.time() - started
+    asked = open(calls).read().splitlines()
+    dump = [line for line in asked if line.startswith('tcpdump')]
+    check('the service: tcpdump on the internal interface alone, -p (no promiscuous port), each packet as it comes, whole, to its pipe',
+          dump, ['tcpdump -p -n -U -i em1 -s 0 -w - ip or ip6'])
+    readers = [line for line in asked if line.startswith('ndpiReader')]
+    check('the service: ndpiReader twice over the window\'s file, once with guessing off',
+          (len(readers), sum(1 for line in readers if line.endswith(' -d'))), (2, 1))
+    check('the service: the tables', {t: sorted(a) for t, a in fake.held.items()},
+          {'appcontrol_cat_Media': ['198.51.100.10'], 'appcontrol_YouTube': ['198.51.100.10'],
+           'appcontrol_cat_Web': ['198.51.100.20'], 'appcontrol_cat_Network': ['198.51.100.53'],
+           'appcontrol_cat_Video': ['2001:db8::443']})
+    saved = json.load(open(os.path.join(tmp, 'status.json')))
+    check('the service: status.json - named, guessed, unknown, TLS alone, not judged',
+          {k: saved['totals'][k] for k in ('named', 'guessed', 'unknown', 'no_app', 'not_judged')},
+          {'named': 4, 'guessed': 1, 'unknown': 1, 'no_app': 1, 'not_judged': 1})
+    unknown_rows = json.load(open(os.path.join(tmp, 'unknown.json')))
+    check('the service: unknown.json - TLS alone with the server name and JA4 its client sent, a guess, one not named',
+          sorted((r['kind'], r['server'], r['server_name'], r['ja4'][:10]) for r in unknown_rows),
+          [('guess', '203.0.113.7', '', ''), ('no_app', '198.51.100.20', 'www.example.com', 't13d1516h2'),
+           ('unknown', '203.0.113.5', '', '')])
+    check('the service: the window\'s files removed', os.listdir(os.path.join(tmp, 'work')), [])
+    pid = int(open(os.path.join(tmp, 'tcpdump.pid')).read())
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except OSError:
+        alive = False
+    check('the service: tcpdump stopped with it, and the service said when', (alive, saved['stopped'] is not None),
+          (False, True))
+    check('the service: two windows of 2 s and 1 s of grace took well under 20 s', took < 20, True)
+
+# --------------------------------------------------------------------------- what the page reads
+import status                                                            # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><Firewall><Alias><aliases>'
+                     '<alias><enabled>1</enabled><name>appcontrol_cat_Web</name><type>external</type>'
+                     '<description>Application Control: category Web</description></alias>'
+                     '<alias><enabled>1</enabled><name>appcontrol_YouTube</name><type>external</type>'
+                     '<description>Application Control: YouTube</description></alias>'
+                     '</aliases></Alias></Firewall><AppControl><general><classify>1</classify>'
+                     '<apps>YouTube,Dropbox</apps></general></AppControl></OPNsense></opnsense>')
+    with open(os.path.join(tmp, 'status.json'), 'w') as handle:
+        json.dump({'since': T0, 'windows': 3, 'totals': {'named': 4}, 'error': None,
+                   'apps': {'YouTube': {'category': 'Media', 'named': 3, 'guessed': 0, 'protocols': ['TLS', 'QUIC'],
+                                        'last': T0 + 10},
+                            'TLS': {'category': 'Web', 'named': 1, 'guessed': 2, 'protocols': ['TLS'], 'last': T0 + 9}}}, handle)
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump({'version': '6.0.d20260909,1', 'protocols': {'Dropbox': 'Cloud', 'YouTube': 'Media'}}, handle)
+    pfctl = os.path.join(tmp, 'pfctl')
+    # pfctl -vvs Tables, as status.py reads it: a table's flags and name, then its counters
+    with open(os.path.join(tmp, 'tables.txt'), 'w') as handle:
+        handle.write('-pa-r--\tappcontrol_cat_Web\n\tAddresses:   7\n-pa----\tappcontrol_YouTube\n\tAddresses:   2\n'
+                     '-pa----\tbogons\n\tAddresses:   9\n')
+    program(pfctl, '#!/bin/sh\ncat %s\n' % os.path.join(tmp, 'tables.txt'))
+    report = status.report(os.path.join(tmp, 'status.json'), config, os.path.join(tmp, 'ndpi.json'),
+                           os.path.join(tmp, 'none.pid'), pfctl, os.path.join(tmp, 'none'))
+    apps_seen = {a['name']: a for a in report['apps']}
+    check('status.py: an application named and chosen - its table and the addresses pf holds in it',
+          (apps_seen['YouTube']['table'], apps_seen['YouTube']['entries'], apps_seen['YouTube']['protocols']),
+          ('appcontrol_YouTube', 2, ['TLS', 'QUIC']))
+    check('status.py: one chosen and not seen yet - listed, no table until Apply made it',
+          (apps_seen['Dropbox']['named'], apps_seen['Dropbox']['category'], apps_seen['Dropbox']['table']), (0, 'Cloud', ''))
+    check('status.py: one seen and not chosen - no table', (apps_seen['TLS']['chosen'], apps_seen['TLS']['table']), (False, ''))
+    check('status.py: the category tables and their addresses; tables not of the plugin not counted',
+          (report['categories'], report['tables']), ([{'table': 'appcontrol_cat_Web', 'name': 'Web', 'entries': 7}],
+                                                     {'categories': 1, 'applications': 1, 'addresses': 9}))
+    check('status.py: no pidfile - not running; nDPI not there - said', (report['running'], report['installed'],
+                                                                          report['classify']), (False, False, True))
+    with open(os.path.join(tmp, 'mine.pid'), 'w') as handle:
+        handle.write(str(os.getpid()))
+    check('status.py: a pidfile naming a live process that is not the classifier - not running',
+          status.running(os.path.join(tmp, 'mine.pid')), None)
+
+
+# ------------------------------------------------------------- the service with nothing it can do
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify>1</classify></general></AppControl></OPNsense></opnsense>')
+    state = classify.serve(stop_after=0, reader=os.path.join(tmp, 'none'), config=config,
+                           catalogue_path=os.path.join(tmp, 'ndpi.json'), status=os.path.join(tmp, 'status.json'),
+                           unknown=os.path.join(tmp, 'unknown.json'), work=os.path.join(tmp, 'work'), refresh=False)
+    saved = json.load(open(os.path.join(tmp, 'status.json')))
+    check('nDPI not installed: the service waits, and says so in status.json', 'nDPI is not installed' in saved['error']['message'],
+          True)
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)
