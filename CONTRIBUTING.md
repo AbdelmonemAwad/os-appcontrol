@@ -1,6 +1,6 @@
 # Working on this
 
-A plugin, planned: knowing which application a connection belongs to - with the open nDPI library - and acting on it: pf tables per application for rules and for routing by gateway, Suricata rules, and a cut in the coprocessor once a connection is known.
+A plugin, written, not released: knowing which application a connection belongs to - with the open nDPI library - and acting on it. Its first part names each connection's application and keeps the servers named in pf tables, one for every nDPI category and one for each application chosen; blocking, Suricata rules, routing by gateway and the cut in the coprocessor come later.
 
 It is one part of the [os-xgs-npu](https://github.com/AbdelmonemAwad/os-xgs-npu) project, and works the same way.
 
