@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
-"""What the classifier reads of nDPI, and its tables, with stand-ins for what only a firewall has:
-ndpiReader and pfctl.
+"""What the classifier reads - nDPI's answers and the packets themselves - and its tables, with
+stand-ins for what only a firewall has: ndpiReader and pfctl.
 
 - ndpiReader's CSV as phase 0's lab read it on an XGS 3300 (OPNsense 26.7.9, ndpi-6.0.d20260909,1):
   tools/fixtures/lab-*.csv are those files with every address made a documentation one; the rows
   and names found must be the lab's. The catalogue's two outputs, -a 1 and -H, are in the format of
   the source of nDPI de5c784 (tools/fixtures/ndpiReader-*.txt, written for the test, not read on a box).
+- capture.py on packets built byte by byte (tools/pcapgen.py): the pcap stream in chunks, the
+  connections and their server, what is kept for nDPI and in which window, and a ClientHello read -
+  the JA4 of FoxIO's own example.
 - tables.py: the alias names and the 31-character rule, the tables the settings ask for, and an
   address added when new and refreshed when seen again.
 
     python3 tools/test-classify.py"""
 import json
 import os
+import struct
 import sys
 import tempfile
 
@@ -24,6 +28,8 @@ FIX = os.path.join(HERE, 'fixtures')
 sys.path.insert(0, HERE)
 sys.path.insert(0, SCRIPTS)
 
+import pcapgen                                                           # noqa: E402
+import capture                                                           # noqa: E402
 import ndpi                                                              # noqa: E402
 import tables                                                            # noqa: E402
 import apps                                                              # noqa: E402
@@ -63,6 +69,8 @@ check('lab, a server-first banner: SMTP 5', labels(rows), {'SMTP': 5})
 some = sorted(rows.values(), key=lambda r: r['sport'])[0]
 check('lab, SMTP: the row read - ends, name, server name', (some['proto'], some['dst'], some['dport'], some['server_name']),
       (6, some['dst'], 25, 'mail.example'))
+check('lab, SMTP: the key is the two ends in one order', capture.flow_key(6, some['dst'], 25, some['src'], some['sport'])
+      in rows, True)
 rows, bad = ndpi.read_csv(os.path.join(FIX, 'lab-header-only.csv'))
 check('lab: a CSV of the header only (ndpiReader with -v) - no row, nothing wrong', (rows, bad), ({}, 0))
 check('a CSV that is not there: no row', ndpi.read_csv(os.path.join(FIX, 'none.csv')), ({}, 0))
@@ -229,6 +237,153 @@ with tempfile.TemporaryDirectory() as tmp:
                    'appcontrol_cat_Gone_used': {'198.51.100.3'}, 'bogons': {'192.0.2.0/24'}})
     check('flush-gone: only a table of the plugin\'s whose alias is gone and no rule uses',
           tables.flush_gone(tables.Pf(run=fake), config), ['appcontrol_cat_Gone'])
+
+
+# --------------------------------------------------------------------------------- the capture
+def stream_of(packets, chunk=None, linktype=1):
+    data = pcapgen.capture(packets, linktype)
+    stream = capture.Stream()
+    out = []
+    step = chunk or len(data)
+    for i in range(0, len(data), step):
+        out.extend(stream.feed(data[i:i + step]))
+    return stream, out
+
+
+T0 = 1794926400.0       # 2026-11-17, in a window of its own whatever its length here
+hello = pcapgen.client_hello(padding=1700)
+conn = pcapgen.tcp_connection(T0 + 1, '192.0.2.10', 50001, '198.51.100.10', 443, hello, server_data=b'\x16\x03\x03' + b'x' * 40)
+stream, packets = stream_of(conn, chunk=7)
+check('a capture fed 7 bytes at a time: every packet, its time, its link type',
+      (len(packets), stream.linktype, round(packets[0][0], 3)), (len(conn), 1, T0 + 1))
+check('the ClientHello in two TCP segments: the handshake, two segments, the answer', len(conn), 6)
+flows = capture.Flows('lan', 60, T0)
+for ts, rec, wire in packets:
+    flows.packet(stream.linktype, ts, rec, wire)
+f = list(flows.table.values())[0]
+check('one connection: client, server, begun here, its window', (f.client, f.server, f.started, f.window),
+      (('192.0.2.10', 50001), ('198.51.100.10', 443), True, int((T0 + 1) // 60)))
+check('its ClientHello put together from two segments: server name, ALPN, the JA4 of FoxIO\'s example',
+      (f.sni, f.alpn, f.ja4), ('www.example.com', 'h2', pcapgen.CHROME_JA4))
+check('its key: the same as a CSV row\'s for its ends', f.key, capture.flow_key(6, '198.51.100.10', 443, '192.0.2.10', 50001))
+
+# the segments out of order, and the first one only after the second
+mixed = conn[:3] + [conn[4], conn[3]] + conn[5:]
+mixed = [(T0 + 1 + i * 0.001, fr) for i, (_, fr) in enumerate(mixed)]
+stream, packets = stream_of(mixed)
+flows = capture.Flows('lan', 60, T0)
+for ts, rec, wire in packets:
+    flows.packet(stream.linktype, ts, rec, wire)
+check('the ClientHello\'s segments the other way round: the same JA4', list(flows.table.values())[0].ja4, pcapgen.CHROME_JA4)
+
+
+def one(packets, since=T0, seconds=60, linktype=1):
+    stream, got = stream_of(packets, linktype=linktype)
+    flows = capture.Flows('lan', seconds, since)
+    for ts, rec, wire in got:
+        flows.packet(stream.linktype, ts, rec, wire)
+    return flows
+
+
+for name, kwargs, want in (
+        ('no server name: i, and the count of extensions without it', {'sni': None}, 't13i1515h2'),
+        ('no ALPN: 00', {'alpn': ()}, 't13d151500'),
+        ('an ALPN beginning and ending in no letter or digit: the hex digits', {'alpn': (b'\xab\x01',)}, 't13d1516a1'),
+        ('TLS 1.2 alone, no supported_versions', {'versions': (), 'extensions': [e for e in pcapgen.CHROME_EXTENSIONS
+                                                                                if e != 0x002b]}, 't12d1515h2')):
+    hello2 = pcapgen.client_hello(**kwargs)
+    fl = one(pcapgen.tcp_connection(T0 + 2, '192.0.2.10', 50002, '198.51.100.10', 443, hello2))
+    check('JA4, ' + name, list(fl.table.values())[0].ja4[:10], want)
+fl = one(pcapgen.tcp_connection(T0 + 2, '192.0.2.10', 50003, '198.51.100.10', 80, data=b'GET / HTTP/1.1\r\n\r\n'))
+check('a client that does not begin with a TLS handshake: no JA4, no server name', (lambda x: (x.ja4, x.sni))(
+    list(fl.table.values())[0]), (None, None))
+
+fl = one(pcapgen.tcp_connection(T0 + 2, '192.0.2.10', 50004, '198.51.100.10', 443, hello)[1:])
+check('a SYN and ACK seen first: the server is the end that sent it', list(fl.table.values())[0].server,
+      ('198.51.100.10', 443))
+fl = one(pcapgen.tcp_connection(T0 + 2, '192.0.2.10', 50005, '198.51.100.10', 8080, syn=False, data=b'x' * 100))
+check('a TCP connection with no SYN: not taken as begun here', list(fl.table.values())[0].started, False)
+dns = [(T0 + 5, pcapgen.frame('192.0.2.10', '198.51.100.53', 17, pcapgen.udp(53000, 53, pcapgen.dns_query()))),
+       (T0 + 5.01, pcapgen.frame('198.51.100.53', '192.0.2.10', 17, pcapgen.udp(53, 53000, b'\0' * 40), to_server=False))]
+fl = one(dns)
+check('UDP: the server is where the first packet went; begun, the capture well under way', (lambda x: (x.server, x.started))(
+    list(fl.table.values())[0]), (('198.51.100.53', 53), True))
+fl = one(dns, since=T0 + 4)
+check('UDP in the capture\'s first seconds: maybe going already, not taken as begun', list(fl.table.values())[0].started, False)
+v6 = pcapgen.tcp_connection(T0 + 2, '2001:db8::10', 50007, '2001:db8::443', 443, hello, vlan=12)
+fl = one(v6)
+check('IPv6 behind a VLAN tag: its ends spelt as a CSV row spells them, and its JA4', (lambda x: (x.server, x.ja4))(
+    list(fl.table.values())[0]), (('2001:db8::443', 443), pcapgen.CHROME_JA4))
+check('an address spelt as ndpi.canonical() spells it', (capture.address(bytes(16)), ndpi.canonical('2001:DB8:0::1')),
+      ('::', '2001:db8::1'))
+ext = struct.pack('!BB6x', 6, 0)                     # a hop-by-hop header before TCP
+packet = pcapgen.ether(pcapgen.ip6('2001:db8::10', '2001:db8::443', 0, pcapgen.tcp(50008, 443, 1, 0, 0x02), ext), 0x86dd)
+check('IPv6 with an extension header: the ports behind it', capture.decode(1, struct.pack('<IIII', 0, 0, len(packet),
+      len(packet)) + packet)[:5], (6, bytes.fromhex('20010db8000000000000000000000010'), 50008,
+                                   bytes.fromhex('20010db8000000000000000000000443'), 443))
+small = pcapgen.frame('192.0.2.10', '198.51.100.10', 6, pcapgen.tcp(50009, 443, 5, 6, 0x10))
+d = capture.decode(1, struct.pack('<IIII', 0, 0, len(small), len(small)) + small)
+check('an Ethernet frame padded to 60 bytes: the padding is no payload', d[8] - d[7], 0)
+frag = pcapgen.ether(pcapgen.ip4('192.0.2.10', '198.51.100.10', 17, b'\x01' * 20, frag=185), 0x0800)
+check('a later IPv4 fragment: no port read from it', capture.decode(1, struct.pack('<IIII', 0, 0, len(frag), len(frag)) +
+                                                                     frag)[2], 0)
+loop = struct.pack('>I', 2) + pcapgen.ip4('192.0.2.10', '198.51.100.10', 17, pcapgen.udp(1, 2, b''))
+null_be = struct.pack('>I', 2) + pcapgen.ip4('192.0.2.10', '198.51.100.10', 17, pcapgen.udp(1, 2, b''))
+null_le = struct.pack('<I', 2) + pcapgen.ip4('192.0.2.10', '198.51.100.10', 17, pcapgen.udp(1, 2, b''))
+check('a tunnel\'s capture (loopback and null link types, either byte order): IPv4 read',
+      [capture.decode(lt, struct.pack('<IIII', 0, 0, len(p), len(p)) + p)[2] for lt, p in
+       ((108, loop), (0, null_be), (0, null_le))], [1, 1, 1])
+check('ARP and a link type not known here: nothing read', (capture.decode(1, bytes(16) + pcapgen.ether(b'\0' * 28, 0x0806)),
+                                                          capture.decode(147, bytes(16) + b'\0' * 40)), (None, None))
+try:
+    capture.Stream().feed(b'\0' * 24)
+    refused = False
+except capture.StreamError:
+    refused = True
+check('bytes that are not pcap: refused', refused, True)
+big = pcapgen.capture([(T0, pcapgen.frame('192.0.2.10', '198.51.100.10', 17, pcapgen.udp(1, 2, b'')))])
+big = big[:24] + struct.pack('<IIII', 0, 0, capture.MAX_RECORD + 1, 0)
+try:
+    capture.Stream().feed(big)
+    refused = False
+except capture.StreamError:
+    refused = True
+check('a record larger than tcpdump writes: refused', refused, True)
+
+# what is kept: the first KEEP packets of a connection, in the window it began in
+long_conn = pcapgen.tcp_connection(T0 + 50, '192.0.2.10', 50010, '198.51.100.10', 443, hello)
+long_conn += [(T0 + 51 + i, pcapgen.frame('198.51.100.10', '192.0.2.10', 6,
+                                         pcapgen.tcp(443, 50010, 60000 + i * 100, 9999, 0x10, b'y' * 100), to_server=False))
+              for i in range(40)]
+stream, got = stream_of(long_conn)
+fl = capture.Flows('lan', 60, T0)
+for ts, rec, wire in got:
+    fl.packet(stream.linktype, ts, rec, wire)
+index = fl.window_of(T0 + 50)
+check('a connection longer than its window: its first 16 packets kept in the window it began in, the rest counted',
+      (len(fl.windows[index].records), list(fl.table.values())[0].packets, sorted(fl.windows)), (16, len(long_conn), [index]))
+win = fl.close(index)
+check('a window closed: its records and its connection handed over, and gone from the capture',
+      (len(win.records), len(win.flows), index in fl.windows), (16, 1, False))
+late = [(T0 + 52, pcapgen.frame('192.0.2.11', '198.51.100.11', 17, pcapgen.udp(1, 2, b'')))]
+stream, got = stream_of(late)
+for ts, rec, wire in got:
+    fl.packet(stream.linktype, ts, rec, wire)
+check('a connection begun in a window already closed: not followed, counted late', (fl.late, len(fl.table)), (1, 1))
+fl.MAX_WINDOW_FLOWS = 2
+stream, got = stream_of([(T0 + 121 + i, pcapgen.frame('192.0.2.%d' % (20 + i), '198.51.100.10', 17,
+                                                      pcapgen.udp(1000 + i, 53, b'q'))) for i in range(4)])
+for ts, rec, wire in got:
+    fl.packet(stream.linktype, ts, rec, wire)
+check('a window past its number of connections: the rest not followed, the window marked',
+      (len(fl.windows[fl.window_of(T0 + 121)].flows), fl.windows[fl.window_of(T0 + 121)].capped, fl.not_followed), (2, True, 2))
+check('a connection not heard from for 180 s: forgotten', fl.forget(T0 + 50 + 40 + 181) >= 1, True)
+with tempfile.TemporaryDirectory() as tmp:
+    path = os.path.join(tmp, 'w.pcap')
+    capture.pcap_file(path, stream.header, [r for _, r, _ in got[:2]])
+    again = capture.Stream()
+    check('a window\'s file: the stream\'s own header and its records, read back as they were',
+          [r for _, r, _ in again.feed(open(path, 'rb').read())], [r for _, r, _ in got[:2]])
 
 
 
