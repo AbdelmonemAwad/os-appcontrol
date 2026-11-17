@@ -573,7 +573,8 @@ check('the Unknown list as written: all of it, latest first', [r['last'] for r i
     len(state.unknown_rows())], [T0 + 799, T0 + 798, 502])
 status = state.status()
 check('status.json: what the page reads', sorted(status), sorted(['since', 'windows', 'window', 'totals', 'apps', 'last', 'error',
-                                                                  'capped_windows', 'stopped', 'interfaces', 'engine']))
+                                                                  'capped_windows', 'dropped_windows', 'stopped', 'interfaces',
+                                                                  'engine']))
 check('status.json: the totals', {k: status['totals'][k] for k in ('named', 'guessed', 'unknown', 'no_app', 'added', 'refreshed')},
       {'named': 10, 'guessed': 2, 'unknown': 2, 'no_app': 2, 'added': 5, 'refreshed': 5})
 
@@ -911,6 +912,52 @@ with tempfile.TemporaryDirectory() as tmp:
           'named, no table', ({k: saved['totals'][k] for k in ('named', 'unknown', 'not_judged')}, rows, held,
                               saved['error']['message']),
           ({'named': 0, 'unknown': 0, 'not_judged': 2}, [], {}, 'ndpiReader ended with status 1 on lan'))
+
+
+# ------------------------------------------------------------------------------------------- the clock stepped
+fl = capture.Flows('lan', 60, T0 + 590)
+feed(fl, pcapgen.tcp_connection(T0 + 600, '192.0.2.10', 50050, '198.51.100.10', 443, data=b'q'))
+fl.close(fl.window_of(T0 + 540))
+going = only(fl)
+back = T0 + 60                                      # the clock set back nine minutes
+feed(fl, pcapgen.tcp_connection(back, '192.0.2.10', 50051, '198.51.100.10', 443, data=b'r'))
+late = fl.late
+dropped = fl.restart(back + 1)
+feed(fl, pcapgen.tcp_connection(back + 2, '192.0.2.10', 50052, '198.51.100.10', 443, data=b's'))
+check('the clock set back: a connection begun then is late until the windows start again; then kept in the window now, the '
+      'window still open dropped, the connection already followed keeping nothing more',
+      (late, dropped, sorted(fl.windows), [f.client[1] for f in getattr(fl.windows.get(fl.window_of(back + 2)), 'flows', [])],
+       going.keep),
+      (4, 1, [fl.window_of(back + 2)], [50052], False))
+check('the clock set back: a connection followed is forgotten in the clock\'s new time', (going.last, fl.forget(back + 1 + 181) >= 1),
+      (back + 1, True))
+feed(fl, [(back + 3, pcapgen.frame('192.0.2.10', '198.51.100.53', 17, pcapgen.udp(53001, 53, pcapgen.dns_query())))])
+check('the clock set back before the capture began: a UDP connection begun now is taken as begun',
+      [f.started for f in fl.table.values() if f.proto == 17], [True])
+
+
+class Clock:
+    """time.time(), moved by step seconds from its call after the given one on."""
+
+    def __init__(self, step, after):
+        self.calls, self.step, self.after = 0, step, after
+
+    def __call__(self):
+        self.calls += 1
+        return time.time() + (self.step if self.calls > self.after else 0)
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    began = time.time()
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, now=Clock(1000, 3), timeout=20)
+    check('the clock gone forward 1000 s: the windows between dropped, not closed one by one - the one judged is one of now',
+          (state.last['window'] >= int((began + 1000) // classify.WINDOW), saved['dropped_windows'] >= 499,
+           time.time() - began < 15), (True, True, True))
+with tempfile.TemporaryDirectory() as tmp:
+    began = time.time()
+    state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, now=Clock(-1000, 3), timeout=15)
+    check('the clock gone back 1000 s: windows close again at once, in the clock\'s new time',
+          (state.windows, state.last and state.last['window'] < int(began // classify.WINDOW)), (1, True))
 
 # --------------------------------------------------------------------------- what the page reads
 import status                                                            # noqa: E402

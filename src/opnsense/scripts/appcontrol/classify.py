@@ -31,6 +31,9 @@ window's close), an address that is no server's - multicast, broadcast, link-loc
 unspecified - or the other end of an ICMP connection: those are counted in status.json as named and
 not put in a table, with the reason.
 
+A clock that steps - back, or forward past windows not yet closed - drops the windows still open, and
+the windows begin again with the one now; status.json counts the windows dropped.
+
 What it found goes to /var/db/os-appcontrol: status.json (the page's cards and Applications) and
 unknown.json (the page's Unknown), written after every window. Nothing is held on the firewall: no
 connection waits for its classification. Errors are written there and to the system log, and the
@@ -71,6 +74,8 @@ GRACE = 10.0                # seconds a window stays open after it ends, for its
 PACKETS_PER_WINDOW = 2000000  # packets one interface is read for in a window; past it, the rest waits
 UNKNOWN_KEEP = 500          # rows the Unknown list keeps of each kind, the latest
 RETRY = 30.0                # seconds before a capture that stopped is started again
+BEHIND = 2                  # windows past their close with none being judged that mean the clock stepped
+                            # forward: a window judged past TIMEOUT leaves at most two behind
 
 DYNAMIC_V4 = ('dhcp', 'pppoe', 'pptp', 'l2tp', 'ppp')
 DYNAMIC_V6 = ('dhcp6', 'slaac', '6rd', '6to4', 'pppoe')
@@ -243,6 +248,7 @@ class State:
         self.last = None
         self.error = None
         self.capped = 0
+        self.dropped = 0                # windows dropped as the clock stepped
         self.stopped = None
 
     def fail(self, message, now=None):
@@ -254,7 +260,7 @@ class State:
             'since': self.since, 'windows': self.windows, 'window': WINDOW,
             'totals': dict(self.totals, not_tabled_why=dict(self.not_tabled)),
             'apps': self.apps, 'last': self.last, 'error': self.error, 'capped_windows': self.capped,
-            'stopped': self.stopped,
+            'dropped_windows': self.dropped, 'stopped': self.stopped,
             'interfaces': [{'key': c.key, 'device': c.dev, 'capturing': c.proc is not None,
                             'packets': c.flows.packets, 'late': c.flows.late, 'unread': c.flows.unread,
                             'error': c.error} for c in captures],
@@ -675,6 +681,22 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                 if not c.start(t):
                     state.fail(c.error, t)
         due = int((t - GRACE) // WINDOW) - 1
+        if current < next_close or (job is None and due - next_close > BEHIND):
+            # The clock stepped back - the windows still open would wait for it, and every connection
+            # begun meanwhile be late - or forward, or the service was held up, past windows it would
+            # close one by one: those windows are dropped, and windows begin again with this one.
+            opened = {i for c in captures for i in c.flows.windows}
+            lost = max(0, current - next_close) + sum(1 for i in opened if not next_close <= i < current)
+            for c in captures:
+                c.flows.restart(t)
+            state.dropped += lost
+            if current < next_close:
+                log('Application Control: the clock went back: %d window(s) still open dropped, classifying goes on '
+                    'from now' % lost)
+            else:
+                log('Application Control: %d window(s) behind - the clock went forward, or the service was held up: '
+                    'dropped, classifying goes on from now' % lost)
+            next_close = current
         if job is None and next_close <= due:
             parts, unread_flows = [], 0
             for c in captures:

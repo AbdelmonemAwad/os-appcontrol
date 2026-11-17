@@ -381,6 +381,20 @@ class Flows:
                 found = win
         return found
 
+    def restart(self, now):
+        """The clock stepped - back, or forward past windows never closed: every window still open
+        dropped with what it kept, the connections followed keep nothing more and are heard from in the
+        clock's new time, and windows begin again with the one now. How many windows were dropped."""
+        dropped = len(self.windows)
+        self.windows = {}
+        self.closed_until = self.window_of(now) - 1
+        self.since = min(self.since, now - self.SETTLE)
+        for flow in self.table.values():
+            flow.keep = False
+            flow.last = min(flow.last, now)
+            _hello_drop(flow)
+        return dropped
+
     def forget(self, now):
         """Connections not heard from for IDLE seconds; how many. The ends of one without SYN are
         remembered for GONE seconds, MAX_GONE of them at most: heard from again, it is one that was
