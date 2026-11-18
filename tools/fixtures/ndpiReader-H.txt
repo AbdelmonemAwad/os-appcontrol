@@ -1,0 +1,29 @@
+Welcome to nDPI 6.0.0
+
+ndpiReader -i <file|device> [-f <filter>]
+
+nDPI supported protocols:
+ Id Userd-id Protocol                   Layer_4    Nw_Proto Breed                 Category           Def UDP Port/s                  Def TCP Port/s                  Custom
+  0        0 Unknown                               X        Unrated               Unspecified                                                                             0
+  5        5 DNS                        TCP/UDP    X        Acceptable            Network            53,5353                         53                                   0
+  7        7 HTTP                       TCP        X        Acceptable            Web                                                80                                   0
+  9        9 NTP                        UDP        X        Acceptable            System             123                                                                  0
+  3        3 SMTP                       TCP        X        Acceptable            Email                                              25,587                               0
+ 81       81 ICMP                                  X        Acceptable            Network                                                                                 0
+ 91       91 TLS                        TCP        X        Safe                  Web                                                443                                  0
+188      188 QUIC                       UDP        X        Acceptable            Web                443                                                                  0
+124      124 YouTube                    TCP                 Fun                   Media                                                                                   0
+133      133 NetFlix                    TCP                 Fun                   Video                                                                                   0
+195      195 Twitch                     TCP                 Fun                   Video                                                                                   0
+176      176 Wikipedia                  TCP                 Safe                  Web                                                                                     0
+220      220 Mozilla                    TCP                 Acceptable            Web                                                                                     0
+169      169 Canonical                  TCP                 Safe                  SoftwareUpdate                                                                          0
+221      221 Cloudflare                 TCP                 Acceptable            Web                                                                                     0
+121      121 Dropbox                    TCP/UDP             Acceptable            Cloud              17500                                                                0
+500      500 Example_Env                TCP                 Potentially_Dangerous Environmental_Services                                                                      0
+
+
+nDPI supported risks:
+  1 XSS                                              Severe   1 Low    Low
+  2 SQL Injection                                    Severe   1 Low    Low
+  3        3 After_Risks                TCP                 Unsafe                Web                                                                                     0

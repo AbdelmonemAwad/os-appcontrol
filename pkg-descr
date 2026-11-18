@@ -1,0 +1,17 @@
+Application Control names the application behind each connection with
+the open nDPI library (OPNsense's package ndpi), and keeps the servers
+it names in pf tables: one for every category nDPI knows and one for
+each application chosen, each an External alias in Firewall: Aliases
+for rules to use, with an expiry. It reads a copy of the traffic of the
+internal interfaces (tcpdump -p, no port made promiscuous) and stands
+in no connection's way. A connection named only by its port or address
+is shown as a guess and put in no table; those nDPI does not name are
+listed with the server name and the JA4 fingerprint their TLS client
+sent. On by default. Nothing is blocked yet.
+
+Plugin Changelog
+================
+
+1.0.0
+
+* Initial release
