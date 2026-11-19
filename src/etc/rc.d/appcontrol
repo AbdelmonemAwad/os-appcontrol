@@ -20,7 +20,9 @@
 #
 # reload has the classifier read its settings again as it runs - SIGHUP, to the classifier itself, not
 # to daemon(8) - so it keeps the connections it remembers; or starts it when it is not running. The
-# page's Apply reloads, and so an application blocked there has its connections cut at once.
+# page's Apply reloads, and so an application blocked there has its connections cut at once. The tmpfs
+# is mounted first when it is not there: a classifier waiting for it looks again at the SIGHUP, as a
+# restart would have it.
 #
 # A window's files - the packets kept for ndpiReader and its two CSVs - are written to a tmpfs
 # mounted here at the start and taken down at the stop, never to the disk. classify.py writes one
@@ -151,7 +153,7 @@ appcontrol_stop()
 
 # The classifier itself, as its pidfile names it, is told to read its settings again; daemon(8) is not
 # asked, and does not pass a SIGHUP on. Not running - stopped, or between two of daemon(8)'s starts - it is
-# started, which reads them.
+# started, which reads them. The tmpfs is mounted first should it not be there.
 appcontrol_reload()
 {
 	local _pid
@@ -161,6 +163,7 @@ appcontrol_reload()
 		appcontrol_start
 		return $?
 	fi
+	appcontrol_mount || warn "${name}: no tmpfs at ${appcontrol_work}: the classifier writes nothing, and says why"
 	echo "Reloading ${name}."
 	kill -HUP "${_pid}"
 }

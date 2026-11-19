@@ -331,6 +331,17 @@ with tempfile.TemporaryDirectory() as tmp:
         time.sleep(0.1)
     check('rc.d/appcontrol onereload, the classifier running: a SIGHUP to it, nothing started, it goes on running',
           (rc, out.strip(), os.path.exists(marker), box.called(), classifier.poll()), (0, 'Reloading appcontrol.', True, [], None))
+    # the tmpfs gone from under a running classifier, which waits for it: mounted, then the SIGHUP that has it look again
+    box.write(box.mounts, '')
+    os.remove(marker)
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onereload')
+    deadline = time.time() + 5
+    while not os.path.exists(marker) and time.time() < deadline:
+        time.sleep(0.1)
+    check('rc.d/appcontrol onereload, the tmpfs not there: mounted first, then the SIGHUP, nothing started',
+          (rc, box.called(), os.path.exists(marker), classifier.poll()),
+          (0, ['mount -t tmpfs -o size=160m,mode=0750 tmpfs %s' % work], True, None))
     classifier.kill()
     classifier.wait()
     os.remove(run_dir + '/appcontrol.pid')
