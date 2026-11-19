@@ -13,8 +13,9 @@ An application chosen to be blocked - none by default - gets a block rule
 of the plugin's on its table, which stops a new connection to its servers,
 and each connection nDPI names as it is cut: its pf states killed by its
 two ends and, where os-xgs-npu is installed, dropped on the coprocessor
-first. What was dropped there is handed back once the application is no
-longer blocked.
+first. Its table takes a server only when the firewall's own resolver
+gives that address for the name the connection carried. What was dropped
+there is handed back once the application is no longer blocked.
 
 Plugin Changelog
 ================

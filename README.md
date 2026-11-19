@@ -30,8 +30,10 @@ Knowing which application a connection belongs to - with the open nDPI library -
 > Settings' *Blocked applications* is blocked: a block rule of the plugin's on its table stops a new
 > connection to its servers, and each connection nDPI names as it is cut - its pf states killed by its
 > two ends and, where os-xgs-npu is installed with *Cut in hardware* on, dropped on the coprocessor
-> first; what was dropped there is handed back once the application is no longer blocked. Nothing is
-> blocked until an application is chosen. Its checks ran away from an appliance (below).
+> first; what was dropped there is handed back once the application is no longer blocked. A server goes
+> into that table only when the firewall's own resolver gives its address for the name the connection
+> carried: a device cannot have an address of its choosing blocked for everyone by writing a name to
+> it. Nothing is blocked until an application is chosen. Its checks ran away from an appliance (below).
 
 <p align="center"><b>Contents:</b> <a href="#what-it-does">What it does</a> &middot; <a href="#how-a-connection-is-named">How a connection is named</a> &middot; <a href="#how-an-application-is-blocked">How an application is blocked</a> &middot; <a href="#not-yet-and-why">Not yet, and why</a> &middot; <a href="#what-is-tested">What is tested</a> &middot; <a href="#installation">Installation</a> &middot; <a href="#updates">Updates</a> &middot; <a href="#where-it-fits">Where it fits</a> &middot; <a href="#licence">Licence</a></p>
 
@@ -64,10 +66,13 @@ one page:
   kept;
 - **blocking, off until chosen** - each application chosen in *Blocked applications* gets a table of its
   own, as one of *Application tables* does, and a block rule of the plugin's on it; the connections nDPI
-  names as it are cut, in hardware too where os-xgs-npu is installed. The Applications tab says, for each,
-  whether it is blocked or chosen and not applied yet, the connections cut and the packets its block rules
-  stopped; a line under the cards, what is blocked and whether os-xgs-npu's *Cut in hardware* is on.
-  *Log what is blocked* (off) logs each packet the rules drop;
+  names as it are cut, in hardware too where os-xgs-npu is installed. Its table takes a server only when
+  the firewall's own resolver vouches for it, and the rule holds every port of a server in it, so another
+  service on the same address is blocked as well. The Applications tab says, for each, whether it is
+  blocked or chosen and not applied yet, the connections cut and the packets its block rules stopped
+  since the rules were last loaded; a line under the cards, what is blocked and whether os-xgs-npu's *Cut
+  in hardware* is on - or the os-xgs-npu installed too old for it. *Log what is blocked* (off) logs each
+  packet the rules drop;
 - **the cards** - applications named, connections classified, unknown, and the last error, with what
   reading the installed nDPI's catalogue found wrong; under them, the windows cut short at a limit.
 
@@ -141,40 +146,76 @@ in the coprocessor first where os-xgs-npu is installed:
   <appcontrol_<application>>` for IPv4 and for IPv6, on no interface, at priority 1 - before the rules of
   Firewall: Rules, as os-blocklists' are - described "Application Control: block" and the application's
   name, logged when *Log what is blocked* is on. Inbound on every interface: a device's packet to a server
-  in the table is dropped where it enters, from a LAN, a VLAN or a VPN alike; the firewall's own
-  connections go out and are not held by it. A table never holds the firewall's own addresses nor its
-  internal networks', so the rule shuts no one out of the firewall. It stops new connections only: pf
-  lets a packet of a state it holds through before any rule;
+  in the table is dropped where it enters, from a LAN, a VLAN or a VPN alike, on every port - so another
+  service on the same address, a front end of Google's or a CDN's, is blocked as well; the firewall's own
+  connections go out and are not held by it. It stops new connections only: pf lets a packet of a state it
+  holds through before any rule;
+- **what goes into a blocked table** - what a device sends names its connection, the server name of TLS and
+  QUIC or HTTP's Host, and a device can write any name to any address: one TLS connection, or one UDP
+  packet, naming the blocked application to the office's resolver would otherwise have the rule hold every
+  device's connections to it. So a blocked application's table takes a server only from `cut.py`, and only
+  when the firewall's own resolver - the system's, as `getaddrinfo()` asks it - gives that address for that
+  name, within 5 seconds for a run's names together; an address written as a name, and no name at all, vouch
+  for nothing. Nor does it take a server nDPI named, within the address expiry, as an application that is
+  not blocked - Search and Gmail on a YouTube front end - and a server in it that a connection names as one
+  is taken out: a QUIC connection to it is named from its first packet, which the rule drops after the
+  capture has seen it - the latest four names of the latest 20,000 servers are kept for that, 7.7 MB at the
+  most as measured here. A server nothing vouches for stays out of the table, and its connection alone is
+  cut - the plan's "the block restricted to cutting the connection where it is needed". A table that becomes
+  blocked is emptied first, so what went into it while its application was only in *Application tables*, on
+  a name alone, leaves it; a restart that finds it blocked before (status.json) leaves it as it is. It never
+  holds the firewall's own addresses, those of its internal networks, nor an address that is not on the
+  internet - private (RFC 1918), shared (RFC 6598), unique-local - as Python's `ipaddress` has them: a host
+  at a VPN's other end, behind a static route or on a DMZ is neither put in a table nor cut, so the rule
+  shuts no one out of the firewall nor off one of its sites;
 - **the cut** - once a window is judged, each connection nDPI named as a blocked application, by its
-  packets, begun here, whose server went into its table is handed to `cut.py` with its two ends, after
-  the server is in the table. `cut.py` kills by its id every pf state holding both ends - the one on the
-  internal interface and the one out of the WAN, whose original ends pf writes after NAT - of the
-  connection's protocol, made no later than its first packet and not over, as os-xgs-npu's and
-  os-blocklists' JA4 cuts do: another application on the same server is not cut. It runs beside the
-  capture, one run at a time, at most 5,000 connections a run and 20,000 waiting, and is stopped at
-  120 s; what it could not do is the page's last error. A guess, a connection whose beginning was not
-  seen, and one to the firewall or a host of its internal networks - those that go into no table - are
-  never cut;
+  packets, begun here, to an address of the internet, is handed to `cut.py` with its two ends and the name
+  it carried. `cut.py` puts its server in the table when the resolver vouches for it, then kills by its id
+  every pf state holding both ends - the one on the internal interface and the one out of the WAN, whose
+  original ends pf writes after NAT - of the connection's protocol, not over, and made within 5 seconds of
+  the connection's first packet, as os-xgs-npu's and os-blocklists' JA4 cuts match: another application on
+  the same server is not cut, nor a later connection on the same ends, nor another device's older one on
+  the ends a forged packet named. The first packet's time is kept on the monotonic clock beside tcpdump's,
+  as pf counts a state's age, so a clock that steps changes nothing. The states are looked up by their
+  ends, read once: 5,000 connections against 37,000 states were matched in 0.04 seconds on the
+  workstation the checks ran on, where matching every pair took 15.6. It runs beside the capture, one run
+  at a time, at most 5,000 connections a run and 20,000 waiting; it stops its kills at 90 s and gives back
+  the connections it did not reach, and one stopped at 120 s has its connections queued again - two runs
+  each, then they are left and said. A connection whose application is no longer blocked is dropped from
+  the queue, and `cut.py` leaves one whose application is not blocked when its run begins. What it could
+  not do is the page's last error. A guess, a connection whose beginning was not seen, and one to the
+  firewall, a host of its internal networks or an address not on the internet are never cut;
 - **in hardware first** - where os-xgs-npu is installed, `cut.py` loads its `hwdrop.py` from its own
   place, not a copy, and has `drop_ends()` drop those connections on the coprocessor before the first
   state is killed, each state's ends apart with its protocol - with XGS: Settings' *Cut in hardware* on,
   at once and both ways; off, each driver takes a connection out of hardware once pf has let go of its
   state. The step has 5 seconds in a thread of its own; past them, or failing, the pf cut goes on and
-  how many were dropped is "unknown", as os-blocklists has it. Without os-xgs-npu, pf alone;
+  how many were dropped is "unknown", as os-blocklists has it. Without os-xgs-npu, pf alone. An os-xgs-npu
+  whose `hwdrop.py` has no `release_addresses()` - its release of 2026-11-08, whose `drop_ends()` takes no
+  protocol and matches nothing given one - is asked nothing, and the page says it is too old;
 - **blocked later** - the service remembers the connections it named that could be cut - the latest
   50,000, for a day, some 9 MB at the most as measured here; one seen to end, or a UDP question and its
   answer, not at all - and when an application becomes blocked, those it remembers as it are cut at
-  once and their servers put in its table, so its rule holds them before a new connection to them has
-  to be named. Apply has the service read its settings again (`rc.d/appcontrol reload`, a SIGHUP) rather
-  than restart it, which would forget them;
+  once and their servers put in its table the same way, when the resolver vouches for them, so its rule
+  holds them before a new connection to them has to be named. Apply has the service read its settings
+  again (`rc.d/appcontrol reload`, a SIGHUP, which mounts the window files' tmpfs first should it be
+  gone) rather than restart it, which would forget them; the service sets its SIGHUP handler before
+  anything else it loads, so a reload in its first moments does not end it;
 - **handed back** - a connection the coprocessor dropped stays dropped there while its sender goes on
-  sending (os-xgs-npu's `hwdrop.py`). `cut.py` writes each one down with its application and its server,
-  and `cut.py release` - run by Apply and by the removal - hands back, by their servers, those of an
-  application no longer blocked, unless an application still blocked holds the same server. pf then
-  decides their packets again, their states gone;
+  sending (os-xgs-npu's `hwdrop.py`). `cut.py` writes down each server whose connections were dropped,
+  with its application and nothing of the device - no address, port or time - and `cut.py release` -
+  run by Apply and by the removal - hands back, by their servers, those of an application no longer
+  blocked, unless an application still blocked holds the same server. pf then decides their packets
+  again, their states gone. The list is written under a lock that a cut holds only while it adds to it,
+  so Apply's hand-back never waits out a cut; a hand-back has 30 seconds, its whole flow table read, and
+  what it could not do is said after Apply and kept for the next. With os-xgs-npu gone since, nothing is
+  in hardware to hand back; with its `hwdrop.py` there and too old or not loading, the list is kept;
 - **counted** - the connections cut, the pf states killed and how many the coprocessor dropped, in
-  status.json and on the page; and, for each blocked application, the packets its two rules stopped,
-  read from pf's own counters (`pfctl -v -s rules`).
+  status.json and on the page; the servers put in a blocked table and the connections cut alone, in
+  status.json; and, for each blocked application, the packets its two rules stopped, read from pf's own
+  counters (`pfctl -v -s rules`), which start again at 0 whenever the rules are loaded - any Apply in
+  Firewall, an interface or gateway event - unless OPNsense's own keep-counters option is on: the page says
+  "since the rules were last loaded".
 
 An allowed connection is not held: it goes into hardware on os-xgs-npu's own schedule, as before. Phase
 0's lab found the host had seen enough of every connection it tried before that - 8 packets at most were
@@ -209,20 +250,35 @@ needed, at a round trip of 50 ms too - so nothing waits for its classification.
   (os-xgs-npu's `docs/measurements/hand-back-2026-11-17.md`). How many packets the rules stop, and how
   long a cut takes on a busy firewall, are not measured.
 - **the first connection to a new server** - a server goes into a blocked application's table when a
-  connection to it is named, so the first one to a server its table does not hold yet runs until its
-  window is judged - some 10 to 70 seconds - and is cut then. A server leaves the table once unseen for
-  the address expiry, and a blocked try is never named, so each server is learned again about once an
-  expiry. Shorter windows while something is blocked are not built: the cost of the windows was measured
-  at 60 seconds.
-- **what is not cut** - a guess, a connection whose beginning was not seen, one to the firewall or a host
-  of its internal networks, and one on an interface the service does not read; the rule still stops a new
-  connection to a server in the table on every interface. What the service remembers since it started -
-  the latest 50,000 for a day - is forgotten by a restart: a boot, an update, `install.sh`.
+  connection to it is named and the resolver vouches for it, so the first one to a server its table does
+  not hold yet runs until its window is judged - some 10 to 70 seconds - and is cut then. A server leaves
+  the table once unseen for the address expiry, and a blocked try is never named, so each server is
+  learned again about once an expiry. Shorter windows while something is blocked are not built: the cost
+  of the windows was measured at 60 seconds.
+- **a server cut alone** - one nothing vouches for stays out of the table: each new connection to it runs
+  until its window is judged and is cut then. That is so for a device whose names come from a resolver
+  of its own - DNS over HTTPS, say - when the firewall's resolver gives other addresses for the same name,
+  for a name written as an address, and for an application nDPI names with no name at all. A connection
+  over UDP - QUIC - takes a new pf state with its next packet once its own is killed, so with pf alone it
+  goes on; where os-xgs-npu drops it on the coprocessor (*Cut in hardware* on) it stops. A block of one
+  device's connections to one server, in pf, for a connection cut alone, is not built.
+- **a name of one's own domain** - the resolver vouches for what a domain's own name servers say: a
+  device whose owner has a domain, and gives a name in it that nDPI takes as the application's, can still
+  have the firewall's resolver give an address of his choosing for it, and that address goes into the
+  table. A single `curl --resolve`, or one forged QUIC packet, no longer does. Corroborating the address
+  in the capture itself - the device's own DNS answer seen going to it - or a block that holds only the
+  devices seen using the application are not built.
+- **what is not cut** - a guess, a connection whose beginning was not seen, one to the firewall, a host
+  of its internal networks or an address not on the internet, and one on an interface the service does
+  not read; the rule still stops a new connection to a server in the table on every interface. What the
+  service remembers since it started - the latest 50,000 for a day - is forgotten by a restart: a boot,
+  an update, `install.sh`.
 - **a category blocked, an exception for one device** - an application alone can be chosen; a category's
   table can be named in a rule of the owner's own. Rules by source - "this application, from that
   network" - are phase 3's grid (the plan's top-01).
-- **packets, not connections** - what the rules stopped is pf's count of packets: one try of a connection
-  is several. The rule drops; a client is not told, and waits for its own timeout.
+- **packets, not connections** - what the rules stopped is pf's count of packets, since the rules were
+  last loaded: one try of a connection is several. The rule drops; a client is not told, and waits for
+  its own timeout.
 - **Suricata rules, routing by gateway** - phases 3 and 4.
 - **at line rate** - the service reads at most 2,000,000 packets an interface in a window - the rest
   waits - and follows at most 100,000 connections begun in one window, keeping 32 MiB of their packets;
@@ -423,6 +479,46 @@ SIGHUP not acted on, an owner's rule on an interface counted as the plugin's, th
 owner's or outbound, Apply restarting the classifier, and the removal not handing back. A first run had
 found one of them untested - an owner's alias by the plugin's kind of name whose description would
 have read as an application's - and the tests reach it now.
+
+After the review of the second part, the same day, each of its findings was fixed in this branch and
+tested the same way - all the checks above run again, all passing:
+
+- **the cut** - `tools/test-cut.py`, 62 checks now: a server put in its application's table before any state
+  is killed only when the resolver stand-in gives that address for the name its connection carried, and not
+  for a name written to another address, an address written as a name, no name, a name not answered within
+  the deadline, nor a server classify.py found shared; a connection of an application no longer blocked
+  left; a state made more than 5 seconds before its connection began - another device's, two hours old, on
+  the ends a forged packet named - not cut; 5,000 connections against 37,000 states matched in well under a
+  second; the kills stopped at the run's budget and the connections not reached given back; an os-xgs-npu
+  with no `release_addresses()`, and one not loading, asked nothing - their list kept by a release; the
+  servers written down with their application alone, each once; a release's own 30 seconds; a cut never held
+  up by a release's lock;
+- **the classifier** - `tools/test-classify.py`, 226 checks now: no server put in a blocked table by the
+  classifier, a table that becomes blocked emptied once and not at a restart that finds it blocked
+  before; one forged QUIC packet's address in no table, its connection queued with the name it carried;
+  a server named as an application not blocked, in the same window or within the expiry, cut alone, and
+  one in a blocked table so named taken out of it; a connection to an address not on the internet -
+  203.0.113.0/24 standing for a site over a VPN - neither cut nor tabled, at once or when remembered;
+  what waits for a cut dropped when its application is unblocked, at a window and at a SIGHUP;
+  connections a cut did not reach, or one stopped at its time, queued again for a second run, then left
+  and said; a connection's first packet on the monotonic clock, a clock stepped 30 s leaving two
+  connections 5 s apart there; SIGHUP's handler set before anything else is loaded; os-xgs-npu too old
+  for the cut in hardware said by `status.py`;
+- **the installation** - `tools/test-install.py`, 40 checks now: `rc.d/appcontrol reload` mounts the
+  window files' tmpfs first when it is gone, then sends the SIGHUP;
+- **the page** - its script under node with a stand-in jQuery: the line of what is blocked with *Cut in
+  hardware* on, off, os-xgs-npu too old and absent, the packets "since the rules were last loaded", and
+  Apply's line with what the hand-back could not do; the strings - 173 the GUI shows, every one in
+  `source.json`, 16 of them waiting for their Arabic in opnsense-arabic.
+
+36 behaviours of these fixes were taken out in turn, on a copy, and the tests failed on each: among them
+a server tabled whatever the resolver says, a shared one tabled all the same, an address written as a
+name vouching, a table that becomes blocked not emptied, the age check one way only, no budget for the
+kills, a run stopped at its time not queued again, a blocked connection to an address not on the
+internet cut, what waits for an unblocked application kept, a cut holding the lock for its whole run, an
+os-xgs-npu too old asked all the same, the device written down beside its server, the wall clock's time
+handed to the cut, SIGHUP's handler set late and a reload that does not mount the tmpfs. The old
+matching, every state against every connection, put back: the timing check alone failed.
 
 Not run: anything of the second part on an appliance or a plain OPNsense, and its page in a browser.
 
