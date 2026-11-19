@@ -24,6 +24,8 @@ two names cut alike never meet. The alias's description carries the name nDPI gi
 An application is blocked once it is chosen in Blocked applications and its table is in config.xml:
 plugins.inc.d/appcontrol.inc gives that table a block rule, and classify.py and cut.py cut its
 connections (blocked()). Chosen and not applied yet - its alias not made - nothing of it is blocked.
+A blocked application's table takes a server only from cut.py, once the firewall's own resolver gives
+that address for the name its connection carried: the rule holds every device's new connections to it.
 
     tables.py wanted       the aliases the settings ask for, as JSON - what aliases.php writes
     tables.py flush-gone   the tables of aliases gone, taken out of pf (Apply, and the plugin's removal)
@@ -189,8 +191,8 @@ def present(path=CONFIG):
 
 
 class Pf:
-    """pfctl, for this plugin's tables: what a table holds, and addresses added or refreshed in it.
-    run(args) -> (exit status, output); a stand-in in the tests."""
+    """pfctl, for this plugin's tables: what a table holds, addresses added or refreshed in it or taken out
+    of it, and a table emptied. run(args) -> (exit status, output); a stand-in in the tests."""
 
     def __init__(self, run=None, pfctl=PFCTL):
         self.pfctl = pfctl
@@ -222,11 +224,24 @@ class Pf:
         new = [a for a in addresses if a not in held]
         again = [a for a in addresses if a in held]
         for verb, group in (('add', new), ('zero', again)):
-            for i in range(0, len(group), BATCH):
-                status, out = self.run(['-t', table, '-T', verb] + group[i:i + BATCH])
-                if status != 0:
-                    self.errors.append('pfctl -t %s -T %s: %s' % (table, verb, out.strip()[:200]))
+            self._each(table, verb, group)
         return len(new), len(again)
+
+    def delete(self, table, addresses):
+        """The addresses taken out of the table; a failure kept in errors, never raised."""
+        self._each(table, 'delete', sorted(set(addresses)))
+
+    def flush(self, table):
+        """Every address taken out of the table; a failure kept in errors, never raised."""
+        status, out = self.run(['-t', table, '-T', 'flush'])
+        if status != 0:
+            self.errors.append('pfctl -t %s -T flush: %s' % (table, out.strip()[:200]))
+
+    def _each(self, table, verb, group):
+        for i in range(0, len(group), BATCH):
+            status, out = self.run(['-t', table, '-T', verb] + group[i:i + BATCH])
+            if status != 0:
+                self.errors.append('pfctl -t %s -T %s: %s' % (table, verb, out.strip()[:200]))
 
 
 def flush_gone(pf, path=CONFIG):
