@@ -387,8 +387,9 @@ On 2026-11-20, from the branch of the second part, away from an appliance - its 
   table, on no interface, priority 1, described with its name, logged as the setting says - and none for
   one not chosen, one not applied yet, an alias switched off, a category's, an owner's alias of the same
   name, or one not External; none with classifying off or nothing chosen; the start at boot as it was;
-- **the classifier** - `tools/test-classify.py`, 195 checks, 38 of them new: the settings read; a table
-  for each application blocked; what is blocked - chosen, its alias there, classifying on; in a window,
+- **the classifier** - `tools/test-classify.py`, 196 checks, 39 of them new: the settings read; a table
+  for each application blocked; what is blocked - chosen, its alias there, classifying on; what is
+  remembered kept as its two ends packed, read back as they were; in a window,
   a connection of a blocked application queued for the cut after its server is in its table - not a
   guess, one not begun here, or one to a LAN host - and of the protocol carrying it; nothing cut for one
   chosen and not applied yet; the others remembered, the latest of them for a day - not one seen to end,
