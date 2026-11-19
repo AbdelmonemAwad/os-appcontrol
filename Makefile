@@ -4,7 +4,7 @@
 #
 PLUGIN_NAME=		appcontrol
 PLUGIN_VERSION=		1.0.0
-PLUGIN_COMMENT=		Which application each connection belongs to, by nDPI
+PLUGIN_COMMENT=		Which application each connection belongs to, by nDPI, and blocking it
 PLUGIN_DEPENDS=		ndpi
 PLUGIN_MAINTAINER=	eg2@live.com
 
