@@ -230,28 +230,32 @@
             $('#ac-pf-alone').toggle(!data.project);
             $('#ac-missing').toggle(!data.installed);
 
-            /* what is blocked: the applications, the connections cut, those dropped in hardware first, and
-               whether os-xgs-npu's Cut in hardware is on - shown once something is chosen to be blocked */
+            /* what is blocked: the applications, the connections cut, those dropped in hardware first, the
+               packets its rules stopped since pf last loaded them - its counters start again then - and
+               whether os-xgs-npu's Cut in hardware is on, or the os-xgs-npu installed too old for it; shown
+               once something is chosen to be blocked */
             const blocking = data.blocking || {};
             const blocked = Array.isArray(blocking.apps) ? blocking.apps : [];
             const pending = Array.isArray(blocking.pending) ? blocking.pending : [];
             const hardware = blocking.hardware || null;
+            const usable = !!(hardware && !hardware.too_old);
             let said = '';
             if (blocked.length) {
                 said = "{{ lang._('Blocked:') }}" + ' ' + blocked.join(', ') + ' · ' + count(blocking.cut) + ' ' +
                     "{{ lang._('connections cut') }}";
-                if (hardware) {
+                if (usable) {
                     said += ' · ' + count(blocking.dropped) + ' ' + "{{ lang._('dropped in hardware first') }}";
                 }
-                said += ' · ' + count(blocking.packets) + ' ' + "{{ lang._('packets stopped') }}" + '.';
+                said += ' · ' + count(blocking.packets) + ' ' + "{{ lang._('packets stopped since the rules were last loaded') }}" + '.';
             }
             if (pending.length) {
                 said += (said ? ' ' : '') + "{{ lang._('Chosen to be blocked, not applied yet:') }}" + ' ' +
                     pending.join(', ') + '.';
             }
             $('#ac-blocking').text(plain(said));
-            $('#ac-hw-on').toggle(!!(blocked.length && hardware && hardware.cut_in_hardware));
-            $('#ac-hw-off').toggle(!!(blocked.length && hardware && !hardware.cut_in_hardware));
+            $('#ac-hw-on').toggle(!!(blocked.length && usable && hardware.cut_in_hardware));
+            $('#ac-hw-off').toggle(!!(blocked.length && usable && !hardware.cut_in_hardware));
+            $('#ac-hw-old').toggle(!!(blocked.length && hardware && hardware.too_old));
             $('#ac-blocking-line').toggle(said !== '');
             $('#ac-capped').text(plain(count(data.capped_windows) + ' ' +
                 "{{ lang._('windows cut short: connections past the packets, connections or bytes a window reads were not classified') }}"))
@@ -383,7 +387,13 @@
                     if (typeof released === 'number' && released > 0) {
                         lines.push(count(released) + ' ' + "{{ lang._('connections handed back from hardware') }}");
                     }
-                    $('#ac-result').attr('class', data && data.status === 'ok' ? 'text-muted' : 'alert alert-danger')
+                    /* what the hand-back could not do - kept for the next Apply - said, not left out */
+                    const late = data && data.released && Array.isArray(data.released.errors) ? data.released.errors : [];
+                    $.each(late, function (i, problem) {
+                        lines.push(String(problem));
+                    });
+                    $('#ac-result').attr('class', data && data.status === 'ok' ? (late.length ? 'alert alert-warning' : 'text-muted')
+                        : 'alert alert-danger')
                         .text(plain(lines.length ? lines.join(' · ') : "{{ lang._('Nothing to change in aliases.') }}")).show();
                     refresh();
                     $('#grid-apps').bootgrid('reload');
@@ -411,6 +421,7 @@
     <span id="ac-blocking"></span>
     <span id="ac-hw-on" style="display: none;">{{ lang._('Cut in hardware is on in XGS: Settings: a connection cut is dropped on the coprocessor first.') }}</span>
     <span id="ac-hw-off" style="display: none;">{{ lang._('Cut in hardware is off in XGS: Settings: a connection cut leaves hardware once pf has let go of its state.') }}</span>
+    <span id="ac-hw-old" class="text-warning" style="display: none;">{{ lang._('The os-xgs-npu installed is too old for Cut in hardware: a connection is cut by pf alone.') }}</span>
 </div>
 
 <ul class="nav nav-tabs" data-tabs="tabs" id="maintabs">
@@ -439,7 +450,7 @@
         </table>
         <div class="text-muted ac-note">
             {{ lang._('Connections: named by nDPI from their packets since the classifier started. Guessed: named by port or address only, never put in a table. Each connection counts once, in the window it began in.') }}
-            {{ lang._('Blocked: chosen in Blocked applications. Connections cut: those nDPI named as the application, their pf states killed. Packets stopped: dropped by its block rules on their way to a server in its table.') }}
+            {{ lang._('Blocked: chosen in Blocked applications. Connections cut: those nDPI named as the application, their pf states killed. Packets stopped: dropped by its block rules on their way to a server in its table, since the firewall\'s rules were last loaded.') }}
         </div>
         <table id="grid-categories" class="table table-condensed table-hover table-striped table-responsive">
             <thead>
@@ -454,7 +465,7 @@
         </table>
         <div class="text-muted ac-note">
             <span id="ac-tables"></span>.
-            {{ lang._('Each table is an External alias in Firewall: Aliases, for a rule\'s source or destination: servers nDPI named, each kept until unseen for the address expiry. The table of an application chosen in Blocked applications has a block rule of this plugin\'s as well.') }}
+            {{ lang._('Each table is an External alias in Firewall: Aliases, for a rule\'s source or destination: servers nDPI named, each kept until unseen for the address expiry. The table of an application chosen in Blocked applications has a block rule of this plugin\'s as well, and takes a server only when the firewall\'s own resolver gives that address for the name its connection carried.') }}
         </div>
     </div>
     <div id="unknown" class="tab-pane">
