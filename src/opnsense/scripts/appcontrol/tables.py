@@ -14,11 +14,16 @@ address seen again is refreshed with pfctl -T zero, which starts its time again 
 FreeBSD 15.1); an address new to the table is added with pfctl -T add.
 
     appcontrol_cat_<category>     one for every category of the installed nDPI
-    appcontrol_<application>      one for each application chosen in Settings
+    appcontrol_<application>      one for each application chosen in Settings, in Application tables
+                                  or in Blocked applications
 
 A name is what OPNsense takes for an alias: letters, digits and _, at most 31 characters. Any other
 character becomes _; a name too long is cut, and given _ and four hex digits of its own SHA-1, so
 two names cut alike never meet. The alias's description carries the name nDPI gives.
+
+An application is blocked once it is chosen in Blocked applications and its table is in config.xml:
+plugins.inc.d/appcontrol.inc gives that table a block rule, and classify.py and cut.py cut its
+connections (blocked()). Chosen and not applied yet - its alias not made - nothing of it is blocked.
 
     tables.py wanted       the aliases the settings ask for, as JSON - what aliases.php writes
     tables.py flush-gone   the tables of aliases gone, taken out of pf (Apply, and the plugin's removal)
@@ -60,8 +65,10 @@ def cut_name(prefix, name):
 
 def settings(path=CONFIG):
     """The plugin's settings out of config.xml: classify (on by default: no element there is on),
-    the interfaces chosen, the applications chosen, the expiry in seconds."""
-    out = {'classify': True, 'interfaces': [], 'apps': [], 'ttl': TTL, 'read': False}
+    the interfaces chosen, the applications chosen for a table, those chosen to be blocked (none by
+    default), whether what is blocked is logged (off by default), the expiry in seconds."""
+    out = {'classify': True, 'interfaces': [], 'apps': [], 'blocked': [], 'block_log': False, 'ttl': TTL,
+           'read': False}
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError):
@@ -73,6 +80,8 @@ def settings(path=CONFIG):
     out['classify'] = (general.findtext('classify') or '1').strip() == '1'
     out['interfaces'] = [i for i in (general.findtext('interfaces') or '').split(',') if i.strip()]
     out['apps'] = [a for a in (general.findtext('apps') or '').split(',') if a.strip()]
+    out['blocked'] = [a for a in (general.findtext('blocked') or '').split(',') if a.strip()]
+    out['block_log'] = (general.findtext('block_log') or '0').strip() == '1'
     try:
         out['ttl'] = max(60, int((general.findtext('ttl') or TTL)))
     except ValueError:
@@ -92,7 +101,8 @@ def load_catalogue(path=CATALOGUE):
 def wanted(conf, catalogue):
     """{alias name: {'kind', 'name', 'description'}} the settings ask for: nothing while classifying is
     off; else a table for every category of the installed nDPI and one for each application chosen
-    that nDPI knows. Names are given in order, categories first, and a name already given makes the
+    that nDPI knows - in Application tables or in Blocked applications, a blocked application's rule
+    being on its table. Names are given in order, categories first, and a name already given makes the
     later one take its suffix."""
     if not conf.get('classify'):
         return {}
@@ -111,9 +121,30 @@ def wanted(conf, catalogue):
         name = categories[cid]
         give(CATEGORY_PREFIX, name, 'category', DESCRIPTION + 'category ' + name)
     known = catalogue.get('protocols') or {}
-    for app in sorted(set(conf.get('apps') or [])):
+    for app in sorted(set(conf.get('apps') or []) | set(conf.get('blocked') or [])):
         if app in known:
             give(PREFIX, app, 'application', DESCRIPTION + app)
+    return out
+
+
+def tabled(conf):
+    """The applications a server is put in a table of its own for: those of Application tables and of
+    Blocked applications."""
+    return set(conf.get('apps') or []) | set(conf.get('blocked') or [])
+
+
+def blocked(conf, aliases):
+    """{application: its table} of the applications blocked: classifying on, chosen in Blocked
+    applications, and its alias in config.xml, switched on (present()) - the rule
+    plugins.inc.d/appcontrol.inc registers is on that table. One chosen whose alias is not there is not
+    blocked yet: the page's Apply makes it."""
+    if not conf.get('classify'):
+        return {}
+    out = {}
+    for app in sorted(set(conf.get('blocked') or [])):
+        table = table_for_app(app, aliases)
+        if table:
+            out[app] = table
     return out
 
 
