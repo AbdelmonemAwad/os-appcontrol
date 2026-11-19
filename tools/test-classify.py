@@ -41,6 +41,12 @@ import tables                                                            # noqa:
 import apps                                                              # noqa: E402
 import classify                                                          # noqa: E402
 
+# Every address here is a documentation one, which Python's ipaddress does not take for the internet's: they
+# stand for it here, as servers out there - but for 203.0.113.0/24, which stands for a site the firewall
+# reaches over a VPN or a route, its addresses private ones.
+INTERNET = ('192.0.2.0/24', '198.51.100.0/24', '2001:db8::/32')
+classify.ALSO_GLOBAL = tuple(classify.ipaddress.ip_network(n) for n in INTERNET)
+
 failures = 0
 checks = 0
 
@@ -248,6 +254,8 @@ class FakePf:
             self.held.setdefault(table, set()).update(addrs)
         if verb == 'flush':
             self.held[table] = set()
+        if verb == 'delete':
+            self.held.get(table, set()).difference_update(addrs)
         if verb == 'kill':
             self.held.pop(table, None)
         return 0, '%d/%d addresses %s.' % (len(addrs), len(addrs), verb)
@@ -499,6 +507,18 @@ fl.forget(T0 + 220 + 181)
 fl.forget(T0 + 220 + 181 + 3601)
 feed(fl, [(T0 + 220 + 181 + 3602, udp_k)])
 check('the same ends an hour after they were forgotten: a connection begun', (only(fl).started, len(fl.gone)), (True, 0))
+fl = capture.Flows('lan', 60, T0)
+check('the reader\'s offset to start with: the wall clock less the monotonic one, now', abs(
+    fl.offset - (time.time() - time.monotonic())) < 5, True)
+fl.offset = 1000.0
+feed(fl, pcapgen.tcp_connection(T0 + 5, '192.0.2.10', 50090, '198.51.100.10', 443, data=b'x'))
+before_step = only(fl)
+fl.offset = 1030.0          # the wall clock stepped 30 s forward
+feed(fl, pcapgen.tcp_connection(T0 + 40, '192.0.2.10', 50091, '198.51.100.10', 443, data=b'x'))
+after_step = [f for f in fl.table.values() if f is not before_step][0]
+check('a connection\'s first packet on the monotonic clock beside the wall clock\'s: its time less the offset the reader '
+      'saw - a clock stepped 30 s forward between two connections 35 s apart leaves them 5 s apart there, as pf counts',
+      (before_step.first, before_step.began, after_step.began - before_step.began), (T0 + 5, T0 + 5 - 1000.0, 5.0))
 
 
 # ------------------------------------------------------------------- judged, and what follows from it
@@ -513,6 +533,7 @@ class F:
         self.ended = ended
         self.packets = packets
         self.first = T0 + 1 if first is None else first
+        self.began = self.first                     # the monotonic clock's, standing in
         self.key = capture.flow_key(proto, client[0], client[1], server[0], server[1])
 
 
@@ -660,6 +681,7 @@ check('status.json: the connections named and put in no table, and why', (lambda
 pipe_r, pipe_w = os.pipe()
 reader = classify.Capture('lan', 'em1', T0)
 reader.proc = type('Proc', (), {'stdout': os.fdopen(pipe_r, 'rb')})()
+reader.flows.offset = 0.0   # as seen before a clock step
 os.write(pipe_w, pcapgen.capture(dns))
 os.close(pipe_w)
 real_decode = capture.decode
@@ -675,6 +697,8 @@ try:
 finally:
     capture.decode = real_decode
 check('a packet the reader cannot make sense of: counted, and the capture goes on', (alive, reader.flows.unread), (True, 2))
+check('each read takes the wall clock less the monotonic one again, for the packets it hands over',
+      abs(reader.flows.offset - (time.time() - time.monotonic())) < 5, True)
 reader.proc.stdout.close()
 
 
@@ -1211,11 +1235,13 @@ dns_named = F(('198.51.100.53', 53), client=('192.0.2.10', 51005), proto=17, pac
 dns_ended = F(('198.51.100.54', 53), client=('192.0.2.10', 51006), ended=True)
 dns_exchange = F(('198.51.100.55', 53), client=('192.0.2.10', 51008), proto=17, packets=2)
 nf = F(('198.51.100.70', 443), client=('192.0.2.10', 51007))
-block_records = [('named', 'TLS.YouTube', yt, row(yt, 'TLS.YouTube')), ('guessed', 'TLS.YouTube', yt_guess, row(yt_guess, 'TLS')),
+block_records = [('named', 'TLS.YouTube', yt, row(yt, 'TLS.YouTube', 'www.youtube.example')),
+                 ('guessed', 'TLS.YouTube', yt_guess, row(yt_guess, 'TLS')),
                  ('named', 'TLS.YouTube', yt_midway, row(yt_midway, 'TLS.YouTube')),
                  ('named', 'TLS.YouTube', yt_lan, row(yt_lan, 'TLS.YouTube')), ('named', 'DNS', dns_named, row(dns_named, 'DNS')),
                  ('named', 'DNS', dns_ended, row(dns_ended, 'DNS')), ('named', 'DNS', dns_exchange, row(dns_exchange, 'DNS')),
-                 ('named', 'TLS.NetFlix', nf, row(nf, 'TLS.NetFlix'))]
+                 ('named', 'TLS.NetFlix', nf, row(nf, 'TLS.NetFlix', 'www.netflix.example'))]
+NETFLIX = dict(aliases, appcontrol_NetFlix={'kind': 'application', 'name': 'NetFlix'})
 
 
 def blocking_state(blocked, apps=('YouTube', 'DNS')):
@@ -1225,48 +1251,206 @@ def blocking_state(blocked, apps=('YouTube', 'DNS')):
 
 
 state = blocking_state(['YouTube'])
-fake = FakePf()
-counts = classify.apply(state, block_records, tables.Pf(run=fake), aliases, T0 + 70)
-check('a window, YouTube blocked: its connection named by its packets, begun here, its server one for a table - queued to be '
-      'cut, its server in its table first; a guess, one not begun here and one to a LAN host never',
-      ([(c['app'], c['name'], c['client'], c['server'], c['proto'], c['first']) for c in state.to_cut], counts['to_cut'],
-       fake.held.get('appcontrol_YouTube')),
-      ([('YouTube', 'TLS.YouTube', ['192.0.2.10', 51001], ['198.51.100.10', 443], 6, T0 + 2)], 1, {'198.51.100.10'}))
-check('the others remembered for when their application is blocked: DNS of four packets and NetFlix, named and begun; '
-      'not one seen to end, a UDP question and its answer - over by now - nor the YouTube connection being cut',
-      sorted((v[0], classify.unpacked(k)[2][0]) for k, v in state.remembered.items()),
-      [('DNS', '198.51.100.53'), ('TLS.NetFlix', '198.51.100.70')])
+# YouTube in Application tables before it was blocked: its table took servers on their names alone
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.53'}})
+counts = classify.apply(state, block_records, tables.Pf(run=fake), aliases, T0 + 70, T0 + 70)
+check('a window, YouTube blocked: its connection named by its packets, begun here, to an address of the internet - queued '
+      'to be cut, with its two ends, when it began and the name it carried; a guess, one not begun here and one to a LAN '
+      'host never',
+      ([(c['app'], c['name'], c['client'], c['server'], c['proto'], c['began'], c['host'], c['alone']) for c in state.to_cut],
+       counts['to_cut']),
+      ([('YouTube', 'TLS.YouTube', ['192.0.2.10', 51001], ['198.51.100.10', 443], 6, T0 + 2, 'www.youtube.example', False)], 1))
+check('YouTube blocked since the last look: its table emptied - what went in on a name alone leaves it - and no server put '
+      'in it here, cut.py putting one there once the resolver vouches for it; its category\'s table as before',
+      (fake.held.get('appcontrol_YouTube'), sorted(fake.held.get('appcontrol_cat_Media', ()))), (set(), ['198.51.100.10']))
+check('the others remembered for when their application is blocked, with the name each carried: DNS of four packets and '
+      'NetFlix, named and begun; not one seen to end, a UDP question and its answer - over by now - nor the YouTube '
+      'connection being cut',
+      sorted((v[0], classify.unpacked(k)[2][0], v[2]) for k, v in state.remembered.items()),
+      [('DNS', '198.51.100.53', ''), ('TLS.NetFlix', '198.51.100.70', 'www.netflix.example')])
 check('status.json: the applications blocked, what is remembered, what waits for a cut',
       (lambda s: (s['blocking'], s['remembered'], s['waiting_cut'], s['totals']['to_cut']))(state.status()),
       (['YouTube'], 2, 1, 1))
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.53'}})
+classify.apply(state, [], tables.Pf(run=fake), aliases, T0 + 130, T0 + 130)
+check('blocked still at the next window: its table left as it is', fake.held.get('appcontrol_YouTube'), {'198.51.100.53'})
 state = blocking_state(['TLS'])
 classify.apply(state, block_records, tables.Pf(run=FakePf()), dict(aliases, appcontrol_TLS={'kind': 'application', 'name': 'TLS'}),
-               T0 + 70)
+               T0 + 70, T0 + 70)
 check('the protocol carrying it blocked - TLS: TLS.YouTube and TLS.NetFlix cut, as TLS', sorted((c['name'], c['app'])
                                                                                           for c in state.to_cut),
       [('TLS.NetFlix', 'TLS'), ('TLS.YouTube', 'TLS')])
 state = blocking_state(['NetFlix'])
-classify.apply(state, block_records, tables.Pf(run=FakePf()), aliases, T0 + 70)
+classify.apply(state, block_records, tables.Pf(run=FakePf()), aliases, T0 + 70, T0 + 70)
 check('chosen to be blocked, its alias not made yet - not applied: nothing cut, its connection remembered',
       (state.to_cut, sorted(v[0] for v in state.remembered.values()), state.blocking),
       ([], ['DNS', 'TLS.NetFlix', 'TLS.YouTube'], {}))
 
-# a newly blocked application: what is remembered of it, cut at once, its servers put in its table
-fake = FakePf()
-puts = {}
+# a newly blocked application: what is remembered of it, cut at once - cut.py putting its servers in its table - and its
+# table given back to be emptied
 state.conf = dict(state.conf, blocked=['NetFlix'])
-blocked_now = classify.block(state, dict(aliases, appcontrol_NetFlix={'kind': 'application', 'name': 'NetFlix'}), puts)
-check('blocked since the last look: its remembered connection queued to be cut, its server for its table, forgotten here',
-      (blocked_now, [(c['app'], c['server']) for c in state.to_cut], puts, sorted(v[0] for v in state.remembered.values())),
-      ({'NetFlix': 'appcontrol_NetFlix'}, [('NetFlix', ['198.51.100.70', 443])], {'appcontrol_NetFlix': {'198.51.100.70'}},
+blocked_now = classify.block(state, NETFLIX, T0 + 70)
+check('blocked since the last look: its remembered connection queued to be cut, with the name it carried, forgotten here; '
+      'its table given back to be emptied',
+      (blocked_now, [(c['app'], c['server'], c['host']) for c in state.to_cut], sorted(v[0] for v in state.remembered.values())),
+      (({'NetFlix': 'appcontrol_NetFlix'}, ['appcontrol_NetFlix']), [('NetFlix', ['198.51.100.70', 443], 'www.netflix.example')],
        ['DNS', 'TLS.YouTube']))
 state.to_cut = []
-classify.block(state, dict(aliases, appcontrol_NetFlix={'kind': 'application', 'name': 'NetFlix'}), puts)
-check('blocked still, looked at again: nothing more queued', state.to_cut, [])
+check('blocked still, looked at again: nothing more queued, nothing emptied', (classify.block(state, NETFLIX, T0 + 70)[1],
+                                                                               state.to_cut), ([], []))
+fake = FakePf()
 added_before = state.totals['added']
-check('put: the servers into pf, counted', (classify.put(state, tables.Pf(run=fake), puts), fake.held,
-                                            state.totals['added'] - added_before),
-      ((1, 0), {'appcontrol_NetFlix': {'198.51.100.70'}}, 1))
+check('put: the servers into pf, counted', (classify.put(state, tables.Pf(run=fake), {'appcontrol_cat_Video': {'198.51.100.70'}}),
+                                            fake.held, state.totals['added'] - added_before),
+      ((1, 0), {'appcontrol_cat_Video': {'198.51.100.70'}}, 1))
+
+# blocked when the service last ran, and still: a restart does not take it for blocked since
+with tempfile.TemporaryDirectory() as tmp:
+    before = os.path.join(tmp, 'status.json')
+    with open(before, 'w') as handle:
+        json.dump({'blocking': ['YouTube', 'NetFlix'], 'since': T0}, handle)
+    check('the applications blocked when the service last wrote status.json, and blocked still - NetFlix no longer is',
+          classify.was_blocking(before, {'classify': True, 'blocked': ['YouTube']}, aliases), {'YouTube': 'appcontrol_YouTube'})
+    with open(before, 'w') as handle:
+        handle.write('{"error": ')
+    check('no status.json, or one not to be read: none', (classify.was_blocking(os.path.join(tmp, 'none.json'), {
+        'classify': True, 'blocked': ['YouTube']}, aliases), classify.was_blocking(before, {'classify': True, 'blocked': [
+            'YouTube']}, aliases)), ({}, {}))
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><Firewall><Alias><aliases><alias><enabled>1</enabled><name>appcontrol_YouTube'
+                     '</name><type>external</type><description>Application Control: YouTube</description></alias>'
+                     '</aliases></Alias></Firewall><AppControl><general><classify>1</classify><blocked>YouTube</blocked>'
+                     '</general></AppControl></OPNsense></opnsense>')
+    with open(before, 'w') as handle:
+        json.dump({'blocking': ['YouTube']}, handle)
+    started = classify.start_state(lambda: T0, os.path.join(tmp, 'none'), config, os.path.join(tmp, 'ndpi.json'), False,
+                                   mounted(tmp), os.path.join(tmp, 'work'), before)
+    check('the service started again: the applications blocked when it last wrote status.json, and still, taken as '
+          'blocked before', started.blocking, {'YouTube': 'appcontrol_YouTube'})
+    fake = FakePf({'appcontrol_YouTube': {'198.51.100.10'}})
+    started.network = NET
+    classify.apply(started, [], tables.Pf(run=fake), aliases, T0 + 70, T0 + 70)
+    check('started again, YouTube blocked before and still: its table not emptied', fake.held['appcontrol_YouTube'],
+          {'198.51.100.10'})
+
+# a name a device writes: one UDP packet named QUIC.YouTube, sent to the resolver the office uses
+forged = F(('198.51.100.53', 443), client=('192.0.2.30', 51301), proto=17, packets=1)
+state = blocking_state(['YouTube'])
+fake = FakePf()
+classify.apply(state, [('named', 'QUIC.YouTube', forged, row(forged, 'QUIC.YouTube', 'www.youtube.example'))],
+               tables.Pf(run=fake), aliases, T0 + 70, T0 + 70)
+check('a QUIC Initial a device sends naming www.youtube.example to another server: that address put in no blocked table '
+      'here - cut.py asks the firewall\'s own resolver first - and the device\'s own connection queued to be cut, with the '
+      'name it carried', (fake.held.get('appcontrol_YouTube'), [(c['server'][0], c['host']) for c in state.to_cut]),
+      (set(), [('198.51.100.53', 'www.youtube.example')]))
+
+# a server shared with an application not blocked: its connection cut alone
+gm = F(('198.51.100.10', 443), client=('192.0.2.20', 51101))
+gm_record = ('named', 'TLS.GMail', gm, row(gm, 'TLS.GMail', 'mail.example'))
+yt_record = ('named', 'TLS.YouTube', yt, row(yt, 'TLS.YouTube', 'www.youtube.example'))
+state = blocking_state(['YouTube'])
+classify.apply(state, [gm_record], tables.Pf(run=FakePf()), aliases, T0 + 10, T0 + 10)
+classify.apply(state, [yt_record], tables.Pf(run=FakePf()), aliases, T0 + 70, T0 + 70)
+check('a server nDPI named as GMail, not blocked, within the address expiry: YouTube\'s connection to it cut alone - its '
+      'server for no blocked table, whatever the resolver says', [c['alone'] for c in state.to_cut], [True])
+state = blocking_state(['YouTube'])
+classify.apply(state, [yt_record, gm_record], tables.Pf(run=FakePf()), aliases, T0 + 70, T0 + 70)
+check('GMail named in the same window, after YouTube: the same - the order of a window does not matter',
+      [c['alone'] for c in state.to_cut], [True])
+state = blocking_state(['YouTube'])
+classify.apply(state, [gm_record], tables.Pf(run=FakePf()), aliases, T0 + 10, T0 + 10)
+classify.apply(state, [yt_record], tables.Pf(run=FakePf()), aliases, T0 + 10 + 3601, T0 + 10 + 3601)
+check('GMail named there longer ago than the address expiry: not shared', [c['alone'] for c in state.to_cut], [False])
+tls_alone = F(('198.51.100.10', 443), client=('192.0.2.22', 51103))
+yt_too = F(('198.51.100.10', 443), client=('192.0.2.23', 51104))
+state = blocking_state(['YouTube'])
+classify.apply(state, [('named', 'TLS', tls_alone, row(tls_alone, 'TLS')), ('named', 'TLS.YouTube', yt_too, row(
+    yt_too, 'TLS.YouTube')), yt_record], tables.Pf(run=FakePf()), aliases, T0 + 70, T0 + 70)
+check('a protocol named alone there, or the blocked application itself from another device: not shared',
+      [c['alone'] for c in state.to_cut], [False, False])
+kept_most = classify.NAMES_MOST
+classify.NAMES_MOST = 2
+try:
+    state = blocking_state(['YouTube'])
+    for i in range(4):
+        classify.note(state, '198.51.100.%d' % i, 'TLS.GMail', T0 + i)
+    check('the names of the latest NAMES_MOST servers kept, the oldest gone first', list(state.names_at),
+          ['198.51.100.2', '198.51.100.3'])
+finally:
+    classify.NAMES_MOST = kept_most
+state = blocking_state(['YouTube'])
+for i, name in enumerate(('TLS.A', 'TLS.B', 'TLS.C', 'TLS.D', 'TLS.E', 'TLS.B')):
+    classify.note(state, '198.51.100.10', name, T0 + i)
+check('the latest NAMES_EACH names of a server kept, one named again the latest', list(state.names_at['198.51.100.10']),
+      ['TLS.C', 'TLS.D', 'TLS.E', 'TLS.B'])
+
+# a server in a blocked table named since as an application not blocked: taken out of it
+quic_gmail = F(('198.51.100.10', 443), client=('192.0.2.21', 51102), proto=17)
+state = blocking_state(['YouTube'])
+state.blocking = {'YouTube': 'appcontrol_YouTube'}
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10', '198.51.100.11'}})
+counts = classify.apply(state, [('named', 'QUIC.GMail', quic_gmail, row(quic_gmail, 'QUIC.GMail', 'mail.example'))],
+                        tables.Pf(run=fake), aliases, T0 + 70, T0 + 70)
+check('a server in YouTube\'s table named as GMail - a QUIC Initial, which nDPI names from its first packet though the rule '
+      'drops it: taken out of the table, it serves GMail too', (sorted(fake.held['appcontrol_YouTube']), counts['untabled'],
+                                                                state.totals['untabled']), (['198.51.100.11'], 1, 1))
+
+# an address not on the internet: a host at a VPN's other end, behind a route, on a DMZ
+RDP = dict(aliases, appcontrol_RDP={'kind': 'application', 'name': 'RDP'})
+site = F(('203.0.113.5', 3389), client=('192.0.2.10', 51201))
+out_there = F(('198.51.100.80', 3389), client=('192.0.2.10', 51202))
+state = blocking_state(['RDP'])
+fake = FakePf()
+counts = classify.apply(state, [('named', 'RDP', site, row(site, 'RDP')), ('named', 'RDP', out_there, row(out_there, 'RDP'))],
+                        tables.Pf(run=fake), RDP, T0 + 70, T0 + 70)
+check('RDP blocked: a session to the remote office\'s server - an address not on the internet - neither cut nor put in a '
+      'table, counted; one to a server out there cut', ([c['server'][0] for c in state.to_cut], fake.held.get('appcontrol_RDP'),
+                                                        counts['not_internet'], state.totals['not_internet']),
+      (['198.51.100.80'], set(), 1, 1))
+state = blocking_state([])
+classify.apply(state, [('named', 'RDP', site, row(site, 'RDP'))], tables.Pf(run=FakePf()), RDP, T0 + 70, T0 + 70)
+state.conf = dict(state.conf, blocked=['RDP'])
+classify.block(state, RDP, T0 + 80)
+check('RDP blocked later: the session it remembered to an address not on the internet not cut, counted',
+      (state.to_cut, state.totals['not_internet'], len(state.remembered)), ([], 1, 0))
+kept_also = classify.ALSO_GLOBAL
+classify.ALSO_GLOBAL = ()
+try:
+    check('internet(): a documentation address is not the internet\'s, as Python\'s ipaddress has it, nor what is no '
+          'address', [classify.internet(a) for a in ('198.51.100.10', '2001:db8::1', '203.0.113.5', 'not an address')],
+          [False] * 4)
+finally:
+    classify.ALSO_GLOBAL = kept_also
+
+# an application unblocked while its connections wait for cut.py: dropped, never cut after
+state = blocking_state(['YouTube'])
+classify.apply(state, block_records, tables.Pf(run=FakePf()), aliases, T0 + 70, T0 + 70)
+waiting_before = len(state.to_cut)
+state.conf = dict(state.conf, blocked=[])
+classify.apply(state, [], tables.Pf(run=FakePf()), aliases, T0 + 130, T0 + 130)
+check('YouTube unblocked at the next window, its connection still waiting for cut.py: dropped from the queue, counted',
+      (waiting_before, state.to_cut, state.totals['cut_unblocked'], state.blocking), (1, [], 1, {}))
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    blocked_config = ('<opnsense><OPNsense><Firewall><Alias><aliases><alias><enabled>1</enabled><name>appcontrol_YouTube</name>'
+                      '<type>external</type><description>Application Control: YouTube</description></alias></aliases></Alias>'
+                      '</Firewall><AppControl><general><classify>1</classify><apps>YouTube</apps><blocked>%s</blocked>'
+                      '</general></AppControl></OPNsense></opnsense>')
+    with open(config, 'w') as handle:
+        handle.write(blocked_config % 'YouTube')
+    state = blocking_state(['YouTube'])
+    classify.reread(state, config, os.path.join(tmp, 'ndpi.json'))
+    classify.apply(state, block_records, tables.Pf(run=FakePf()), aliases, T0 + 70, T0 + 70)
+    with open(config, 'w') as handle:
+        handle.write(blocked_config % '')
+    emptied = classify.reread(state, config, os.path.join(tmp, 'ndpi.json'))
+    check('read again (SIGHUP), YouTube unblocked: what waited for its cut dropped, nothing to empty',
+          (state.to_cut, state.blocking, emptied, state.totals['cut_unblocked']), ([], {}, [], 1))
+    with open(config, 'w') as handle:
+        handle.write(blocked_config % 'YouTube')
+    check('read again, YouTube blocked since: its table given back to be emptied', classify.reread(
+        state, config, os.path.join(tmp, 'ndpi.json')), ['appcontrol_YouTube'])
 
 # what is remembered: its two ends packed, the latest REMEMBER, for REMEMBER_FOR seconds
 pk4, pk6 = classify.packed(6, ('192.0.2.10', 51001), ('198.51.100.10', 443)), classify.packed(
@@ -1280,7 +1464,7 @@ try:
     state = blocking_state([])
     many = [F(('198.51.100.%d' % (100 + i), 443), client=('192.0.2.10', 52000 + i), first=T0 + i) for i in range(5)]
     classify.apply(state, [('named', 'TLS.YouTube', f, row(f, 'TLS.YouTube')) for f in many], tables.Pf(run=FakePf()), aliases,
-                   T0 + 70)
+                   T0 + 70, T0 + 70)
     check('remembered: the latest 3 of 5, the oldest gone first', [classify.unpacked(k)[2][0] for k in state.remembered],
           ['198.51.100.102', '198.51.100.103', '198.51.100.104'])
     classify.forget_remembered(state, T0 + 3 + 600)
@@ -1310,6 +1494,24 @@ finally:
     classify.CUT_WAITING = kept_waiting
     classify.log = real_log
 
+# what a cut did not reach: queued again, first, each connection given CUT_TRIES runs
+said = []
+real_log = classify.log
+classify.log = said.append
+try:
+    state = blocking_state(['YouTube'])
+    state.to_cut = [{'client': ['192.0.2.10', 53100], 'app': 'YouTube'}]
+    again = classify.requeue(state, [{'client': ['192.0.2.10', 53101], 'app': 'YouTube'},
+                                     {'client': ['192.0.2.10', 53102], 'app': 'YouTube', 'tries': 2}, 'not a connection'],
+                             T0, 'cut.py stopped at 120 s')
+    check('a cut\'s connections not reached: queued again before those waiting, a second run each; one that had its '
+          'second left uncut, counted, said', (again, [(c['client'][1], c.get('tries')) for c in state.to_cut],
+                                               state.totals['cut_skipped'], said),
+          (1, [(53101, 2), (53100, None)], 1,
+           ['1 connection(s) of a blocked application left uncut: cut.py stopped at 120 s, 2 times']))
+finally:
+    classify.log = real_log
+
 # ---------------------------------------------------------------------------- cut.py run beside the capture
 with tempfile.TemporaryDirectory() as tmp:
     work = os.path.join(tmp, 'work')
@@ -1321,8 +1523,10 @@ with tempfile.TemporaryDirectory() as tmp:
             'mode = open(%r).read().strip() if os.path.exists(%r) else ""\n'
             'if mode == "slow":\n    time.sleep(30)\n'
             'if mode == "garbled":\n    print("not json")\n    sys.exit(0)\n'
+            'left = conns[1:] if mode == "left" else []\nconns = conns[:1] if mode == "left" else conns\n'
             'apps = {}\nfor c in conns:\n    apps[c["app"]] = apps.get(c["app"], 0) + 1\n'
             'print(json.dumps({"connections": len(conns), "cut": len(conns), "states": 2 * len(conns), "dropped": 1, '
+            '"tabled": 1, "alone": len(conns) - 1, "hardware": "ready", "left": left, '
             '"apps": apps, "errors": ["a state pfctl would not kill"] if mode == "said" else []}))\n'
             % (asked_file, os.path.join(tmp, 'mode'), os.path.join(tmp, 'mode')))
 
@@ -1335,20 +1539,20 @@ with tempfile.TemporaryDirectory() as tmp:
     state = blocking_state(['YouTube'])
     state.apps['YouTube'] = {'category': 'Media', 'named': 1, 'guessed': 0, 'protocols': ['TLS'], 'last': T0}
     one_cut = {'proto': 6, 'client': ['192.0.2.10', 51001], 'server': ['198.51.100.10', 443], 'name': 'TLS.YouTube',
-               'app': 'YouTube', 'first': T0}
+               'app': 'YouTube', 'began': T0, 'host': 'www.youtube.example', 'alone': False}
     state.to_cut = [dict(one_cut)]
     cutter = classify.Cutter(work, stand_in)
     run_cutter(cutter, state)
     asked = [json.loads(line) for line in open(asked_file)]
     check('cut.py: run with "cut" and a file holding the connections, as classify.py hands them over',
           asked, [['cut', [one_cut]]])
-    check('its answer counted: connections cut, states killed, dropped in hardware, each application\'s, the last cut',
-          ({k: state.totals[k] for k in ('cut', 'cut_states', 'cut_dropped')}, state.apps['YouTube'].get('cut'),
-           state.last_cut, state.to_cut, os.listdir(work)),
-          ({'cut': 1, 'cut_states': 2, 'cut_dropped': 1}, 1, {'at': T0, 'asked': 1, 'cut': 1, 'states': 2, 'dropped': 1}, [],
-           []))
-    state.to_cut = [{'proto': 6, 'client': ['192.0.2.10', 51000 + i], 'server': ['198.51.100.10', 443], 'name': 'TLS.YouTube',
-                     'app': 'YouTube', 'first': T0} for i in range(7)]
+    check('its answer counted: connections cut, states killed, dropped in hardware, servers put in their tables and '
+          'connections cut alone, each application\'s, the last cut',
+          ({k: state.totals[k] for k in ('cut', 'cut_states', 'cut_dropped', 'cut_tabled', 'cut_alone')},
+           state.apps['YouTube'].get('cut'), state.last_cut, state.to_cut, os.listdir(work)),
+          ({'cut': 1, 'cut_states': 2, 'cut_dropped': 1, 'cut_tabled': 1, 'cut_alone': 0}, 1,
+           {'at': T0, 'asked': 1, 'cut': 1, 'states': 2, 'tabled': 1, 'alone': 0, 'dropped': 1, 'hardware': 'ready'}, [], []))
+    state.to_cut = [dict(one_cut, client=['192.0.2.10', 51000 + i]) for i in range(7)]
     kept_most = classify.CUT_MOST
     classify.CUT_MOST = 5
     try:
@@ -1363,13 +1567,20 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         classify.CUT_MOST = kept_most
     with open(os.path.join(tmp, 'mode'), 'w') as handle:
+        handle.write('left')
+    state.to_cut = [dict(one_cut, client=['192.0.2.10', 51200 + i]) for i in range(3)]
+    run_cutter(cutter, state)
+    check('cut.py out of its own time before some: those it gives back queued again, a second run each',
+          [(c['client'][1], c.get('tries')) for c in state.to_cut], [(51201, 2), (51202, 2)])
+    run_cutter(cutter, state)
+    check('given back again on their second run: left uncut, counted', (state.to_cut, state.totals['cut_skipped']), ([], 1))
+    with open(os.path.join(tmp, 'mode'), 'w') as handle:
         handle.write('said')
     said = []
     real_log = classify.log
     classify.log = said.append
     try:
-        state.to_cut = [{'proto': 6, 'client': ['192.0.2.10', 51001], 'server': ['198.51.100.10', 443], 'name': 'TLS.YouTube',
-                         'app': 'YouTube', 'first': T0}]
+        state.to_cut = [dict(one_cut)]
         run_cutter(cutter, state)
         check('what cut.py could not do: said, as the Last error', said[-1:], ['the cut: a state pfctl would not kill'])
         with open(os.path.join(tmp, 'mode'), 'w') as handle:
@@ -1383,17 +1594,18 @@ with tempfile.TemporaryDirectory() as tmp:
             handle.write('slow')
         kept_timeout = classify.CUT_TIMEOUT
         classify.CUT_TIMEOUT = 1
-        state.to_cut = [{'proto': 6, 'client': ['192.0.2.10', 51001], 'server': ['198.51.100.10', 443], 'name': 'TLS.YouTube',
-                         'app': 'YouTube', 'first': T0}]
+        state.to_cut = [dict(one_cut)]
         began = time.time()
         run_cutter(cutter, state)
+        check('cut.py past its time: stopped, said, its file removed, its connections queued again for a second run',
+              (time.time() - began < 10, said[-1], cutter.proc, os.listdir(work), [c.get('tries') for c in state.to_cut]),
+              (True, 'cut.py took longer than 1 s: 1 connection(s) of a blocked application queued again', None, [], [2]))
+        run_cutter(cutter, state)
         classify.CUT_TIMEOUT = kept_timeout
-        check('cut.py past its time: stopped, said, its file removed', (time.time() - began < 10, said[-1], cutter.proc,
-                                                                       os.listdir(work)),
-              (True, 'cut.py took longer than 1 s: 1 connection(s) of a blocked application may not be cut', None, []))
+        check('past its time again, on their second run: left uncut, said', (state.to_cut, said[-1]),
+              ([], '1 connection(s) of a blocked application left uncut: cut.py stopped at 1 s, 2 times'))
         missing = classify.Cutter(work, os.path.join(tmp, 'none.py'))
-        state.to_cut = [{'proto': 6, 'client': ['192.0.2.10', 51001], 'server': ['198.51.100.10', 443], 'name': 'TLS.YouTube',
-                         'app': 'YouTube', 'first': T0}]
+        state.to_cut = [dict(one_cut)]
         missing.start(state, T0)
         check('cut.py not to be run: said, nothing left behind', (said[-1].startswith('1 connection(s) of a blocked application '
                                                                                      'not cut: cut.py could not be run'),
@@ -1417,9 +1629,13 @@ with tempfile.TemporaryDirectory() as tmp:
                                               change=lambda text: text.replace('<apps>YouTube</apps>',
                                                                                '<apps></apps><blocked>YouTube</blocked>'))
     handed = [c for line in open(cuts_file) for c in json.loads(line)] if os.path.exists(cuts_file) else []
-    check('the service, YouTube blocked: its server in its table, then its connection handed to cut.py with its two ends',
-          (held.get('appcontrol_YouTube'), [(c['app'], c['client'], c['server']) for c in handed]),
-          (['198.51.100.10'], [('YouTube', ['192.0.2.10', 50001], ['198.51.100.10', 443])]))
+    check('the service, YouTube blocked: its table emptied as it became blocked, nothing put in it by the classifier, '
+          'and its connection handed to cut.py with its two ends and the name it carried - cut.py putting the server in '
+          'the table once the resolver vouches for it',
+          (held.get('appcontrol_YouTube'), [(c['app'], c['client'], c['server'], c['host']) for c in handed]),
+          ([], [('YouTube', ['192.0.2.10', 50001], ['198.51.100.10', 443], 'www.example.com')]))
+    check('the service: the connection\'s first packet on the monotonic clock, as pf\'s age of a state is - not the wall '
+          'clock\'s', [abs(c['began'] - time.monotonic()) < 120 for c in handed], [True])
     check('the service: what cut.py said, in status.json - the totals, YouTube\'s, the applications blocked',
           ({k: saved['totals'][k] for k in ('to_cut', 'cut', 'cut_states')}, saved['apps']['YouTube'].get('cut'), saved['blocking']),
           ({'to_cut': 1, 'cut': 1, 'cut_states': 2}, 1, ['YouTube']))
@@ -1461,6 +1677,13 @@ with tempfile.TemporaryDirectory() as tmp:
           (['TLS.YouTube'], [('YouTube', ['192.0.2.10', 50001])], True, 1))
     check('read again: YouTube blocked, its connection forgotten as it is cut', (saved['blocking'], state.remembered.get(
         classify.packed(6, ('192.0.2.10', 50001), ('198.51.100.10', 443)))), (['YouTube'], None))
+
+# ---------------------------------------------------- SIGHUP's handler, set before anything else is loaded
+source = open(os.path.join(SCRIPTS, 'classify.py'), encoding='utf-8').read()
+check('SIGHUP\'s handler set as classify.py is loaded, before its other imports: a reload in the service\'s first moments '
+      'is not taken for its end', (classify.signal.getsignal(classify.signal.SIGHUP) is classify.read_again,
+                                   source.index('signal.signal(signal.SIGHUP, read_again)') < source.index('import errno')),
+      (True, True))
 
 # ---------------------------------------------------- nothing it can do at the start: looked at again at a SIGHUP
 with tempfile.TemporaryDirectory() as tmp:
@@ -1546,11 +1769,16 @@ with tempfile.TemporaryDirectory() as tmp:
           {'apps': ['YouTube'], 'pending': ['TikTok'], 'log': True, 'cut': 3, 'states': 5, 'dropped': 2, 'packets': 15,
            'hardware': None})
     with open(hw, 'w') as handle:
-        handle.write('# os-xgs-npu\n')
+        handle.write('# os-xgs-npu\ndef drop_ends(groups, path=None):\n    return 0\n\n\n'
+                     'def release_addresses(contains):\n    return 0\n')
     check('status.py: os-xgs-npu\'s hwdrop.py there, Cut in hardware off in XGS: Settings - said',
-          status.hardware(config, hw), {'cut_in_hardware': False})
+          status.hardware(config, hw), {'cut_in_hardware': False, 'too_old': False})
     check('status.py: Cut in hardware not in config.xml - on, as os-xgs-npu has it by default',
-          status.hardware(os.path.join(tmp, 'none.xml'), hw), {'cut_in_hardware': True})
+          status.hardware(os.path.join(tmp, 'none.xml'), hw), {'cut_in_hardware': True, 'too_old': False})
+    with open(hw, 'w') as handle:
+        handle.write('# os-xgs-npu of 2026-11-08\ndef drop_ends(groups, path=None):\n    return 0\n')
+    check('status.py: an os-xgs-npu whose hwdrop.py has no release_addresses() - its release of 2026-11-08 - too old for '
+          'the cut in hardware, said', status.hardware(config, hw), {'cut_in_hardware': False, 'too_old': True})
     check('status.py: pf\'s rules not to be read - none counted', status.stopped_packets(os.path.join(tmp, 'none')), None)
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)

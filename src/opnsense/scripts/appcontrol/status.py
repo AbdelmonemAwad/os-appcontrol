@@ -6,7 +6,9 @@
 """What the page shows, as one JSON object: whether the classifier runs, what it found since it
 started (classify.py's status.json), the applications with their category and table, the tables
 and how many addresses pf holds in each, the installed nDPI, and what is blocked - each blocked
-application's connections cut and the packets its block rule stopped, read from pf's own counters.
+application's connections cut and the packets its block rule stopped, read from pf's own counters,
+which start again at 0 whenever the firewall's rules are loaded (OPNsense keeps them only with its
+own keep-counters option).
 
     status.py            the cards and the Applications tab
     status.py unknown    the Unknown tab: the connections nDPI did not name, latest first
@@ -106,14 +108,21 @@ def stopped_packets(pfctl=tables.PFCTL):
 
 def hardware(config=tables.CONFIG, hwdrop=HWDROP):
     """os-xgs-npu's cut in hardware, as a cut uses it: None where its hwdrop.py is not installed; else
-    {'cut_in_hardware': XGS: Settings' "Cut in hardware", on unless switched off}."""
+    {'cut_in_hardware': XGS: Settings' "Cut in hardware", on unless switched off; 'too_old': its hwdrop.py
+    has no release_addresses() - an os-xgs-npu before 2026-11-17, its last release among them, whose
+    drop_ends() takes no protocol: cut.py asks it nothing (cut.py's hardware())}."""
     if not os.path.isfile(hwdrop):
         return None
     try:
         text = ET.parse(config).getroot().findtext('OPNsense/XGS/general/cut_in_hardware')
     except (OSError, ET.ParseError):
         text = None
-    return {'cut_in_hardware': (text or '1').strip() != '0'}
+    try:
+        with open(hwdrop, encoding='utf-8', errors='replace') as handle:
+            too_old = 'def release_addresses(' not in handle.read()
+    except OSError:
+        too_old = True
+    return {'cut_in_hardware': (text or '1').strip() != '0', 'too_old': too_old}
 
 
 def report(status_path=STATUS, config=tables.CONFIG, catalogue_path=tables.CATALOGUE, pidfile=PIDFILE,
