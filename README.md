@@ -162,10 +162,11 @@ in the coprocessor first where os-xgs-npu is installed:
   state. The step has 5 seconds in a thread of its own; past them, or failing, the pf cut goes on and
   how many were dropped is "unknown", as os-blocklists has it. Without os-xgs-npu, pf alone;
 - **blocked later** - the service remembers the connections it named that could be cut - the latest
-  50,000, for a day, one seen to end not at all - and when an application becomes blocked, those it
-  remembers as it are cut at once and their servers put in its table, so its rule holds them before a
-  new connection to them has to be named. Apply has the service read its settings again (`rc.d/appcontrol
-  reload`, a SIGHUP) rather than restart it, which would forget them;
+  50,000, for a day; one seen to end, or a UDP question and its answer, not at all - and when an
+  application becomes blocked, those it remembers as it are cut at once and their servers put in its
+  table, so its rule holds them before a new connection to them has to be named. Apply has the service
+  read its settings again (`rc.d/appcontrol reload`, a SIGHUP) rather than restart it, which would forget
+  them;
 - **handed back** - a connection the coprocessor dropped stays dropped there while its sender goes on
   sending (os-xgs-npu's `hwdrop.py`). `cut.py` writes each one down with its application and its server,
   and `cut.py release` - run by Apply and by the removal - hands back, by their servers, those of an
@@ -390,7 +391,8 @@ On 2026-11-20, from the branch of the second part, away from an appliance - its 
   for each application blocked; what is blocked - chosen, its alias there, classifying on; in a window,
   a connection of a blocked application queued for the cut after its server is in its table - not a
   guess, one not begun here, or one to a LAN host - and of the protocol carrying it; nothing cut for one
-  chosen and not applied yet; the others remembered, the latest of them for a day, one seen to end not;
+  chosen and not applied yet; the others remembered, the latest of them for a day - not one seen to end,
+  nor a UDP question and its answer;
   an application blocked later cut at once from what is remembered, its servers put in its table; what
   waits for a cut kept to its bound, and said; `cut.py` run beside the capture - its answer counted, per
   application too, at most 5,000 a run, one run at a time, one past its time stopped, one that cannot be
@@ -411,7 +413,7 @@ On 2026-11-20, from the branch of the second part, away from an appliance - its 
   run under node with a stand-in jQuery: the line of what is blocked, with *Cut in hardware* on, off and
   without os-xgs-npu, one chosen and not applied yet, and nothing blocked; the Blocked column.
 
-43 behaviours of the second part were taken out in turn, on a copy, and the tests failed on each: among
+44 behaviours of the second part were taken out in turn, on a copy, and the tests failed on each: among
 them a connection cut by its server alone, a UDP state cut for a TCP connection, a later connection on
 the same ends cut, the hardware step after the kills or with no deadline, a server still blocked handed
 back, a failed hand-back forgotten, a guess cut, a blocked application's servers not put in its table,

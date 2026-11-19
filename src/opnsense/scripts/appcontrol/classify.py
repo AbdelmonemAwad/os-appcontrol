@@ -44,7 +44,8 @@ connection whose beginning was not seen, and one whose server goes into no table
 of its internal networks, ICMP - are never cut, as they are never put in a table.
 
 The connections named here that could be cut are remembered - the latest REMEMBER, for REMEMBER_FOR
-seconds at most, one seen to end (FIN or RST) not at all - and when an application becomes blocked,
+seconds at most; one seen to end (FIN or RST), or a UDP exchange of two packets, not at all - and when
+an application becomes blocked,
 those remembered as it are cut at once and their servers put in its table, so its block rule holds
 them before a new connection to them has to be named. SIGHUP has the settings read again (rc.d
 appcontrol reload, the page's Apply): the blocked applications among them, the interfaces at the next
@@ -471,7 +472,9 @@ def apply(state, records, pf, aliases, now):
                 hit = app if app in blocked else master if master in blocked else None
                 if hit is not None:
                     queue_cut(state, flow.key, name, flow.client, flow.server, flow.proto, flow.first, hit)
-                elif not flow.ended:
+                elif not flow.ended and not (flow.proto == capture.UDP and flow.packets <= 2):
+                    # a UDP question and its answer - DNS, NTP - is over by the time it is judged, and
+                    # would fill what is remembered on a busy network
                     remember(state, flow, name)
             if begun and ndpi.carried_only(name):
                 counts['no_app'] += 1

@@ -506,11 +506,12 @@ class F:
     """A connection as capture.Flow gives it, for the records."""
 
     def __init__(self, server, started=True, sni=None, ja4=None, proto=6, client=('192.0.2.10', 50000), iface='lan',
-                 ended=False, first=None):
+                 ended=False, first=None, packets=10):
         self.server, self.client, self.started, self.sni, self.ja4, self.proto, self.iface = (
             server, client, started, sni, ja4, proto, iface)
         self.cut = False
         self.ended = ended
+        self.packets = packets
         self.first = T0 + 1 if first is None else first
         self.key = capture.flow_key(proto, client[0], client[1], server[0], server[1])
 
@@ -1206,13 +1207,15 @@ yt = F(('198.51.100.10', 443), client=('192.0.2.10', 51001), first=T0 + 2)
 yt_guess = F(('198.51.100.11', 443), client=('192.0.2.10', 51002))
 yt_midway = F(('198.51.100.12', 443), client=('192.0.2.10', 51003), started=False)
 yt_lan = F(('192.0.2.50', 443), client=('203.0.113.99', 51004))
-dns_named = F(('198.51.100.53', 53), client=('192.0.2.10', 51005), proto=17)
-dns_ended = F(('198.51.100.54', 53), client=('192.0.2.10', 51006), proto=17, ended=True)
+dns_named = F(('198.51.100.53', 53), client=('192.0.2.10', 51005), proto=17, packets=4)
+dns_ended = F(('198.51.100.54', 53), client=('192.0.2.10', 51006), ended=True)
+dns_exchange = F(('198.51.100.55', 53), client=('192.0.2.10', 51008), proto=17, packets=2)
 nf = F(('198.51.100.70', 443), client=('192.0.2.10', 51007))
 block_records = [('named', 'TLS.YouTube', yt, row(yt, 'TLS.YouTube')), ('guessed', 'TLS.YouTube', yt_guess, row(yt_guess, 'TLS')),
                  ('named', 'TLS.YouTube', yt_midway, row(yt_midway, 'TLS.YouTube')),
                  ('named', 'TLS.YouTube', yt_lan, row(yt_lan, 'TLS.YouTube')), ('named', 'DNS', dns_named, row(dns_named, 'DNS')),
-                 ('named', 'DNS', dns_ended, row(dns_ended, 'DNS')), ('named', 'TLS.NetFlix', nf, row(nf, 'TLS.NetFlix'))]
+                 ('named', 'DNS', dns_ended, row(dns_ended, 'DNS')), ('named', 'DNS', dns_exchange, row(dns_exchange, 'DNS')),
+                 ('named', 'TLS.NetFlix', nf, row(nf, 'TLS.NetFlix'))]
 
 
 def blocking_state(blocked, apps=('YouTube', 'DNS')):
@@ -1229,8 +1232,9 @@ check('a window, YouTube blocked: its connection named by its packets, begun her
       ([(c['app'], c['name'], c['client'], c['server'], c['proto'], c['first']) for c in state.to_cut], counts['to_cut'],
        fake.held.get('appcontrol_YouTube')),
       ([('YouTube', 'TLS.YouTube', ['192.0.2.10', 51001], ['198.51.100.10', 443], 6, T0 + 2)], 1, {'198.51.100.10'}))
-check('the others remembered for when their application is blocked: DNS and NetFlix, named and begun; one seen to end, '
-      'and the YouTube connection being cut, not', sorted(v[0] for v in state.remembered.values()), ['DNS', 'TLS.NetFlix'])
+check('the others remembered for when their application is blocked: DNS of four packets and NetFlix, named and begun; '
+      'not one seen to end, a UDP question and its answer - over by now - nor the YouTube connection being cut',
+      sorted((v[0], v[2][0]) for v in state.remembered.values()), [('DNS', '198.51.100.53'), ('TLS.NetFlix', '198.51.100.70')])
 check('status.json: the applications blocked, what is remembered, what waits for a cut',
       (lambda s: (s['blocking'], s['remembered'], s['waiting_cut'], s['totals']['to_cut']))(state.status()),
       (['YouTube'], 2, 1, 1))
