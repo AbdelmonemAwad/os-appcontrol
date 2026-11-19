@@ -162,11 +162,11 @@ in the coprocessor first where os-xgs-npu is installed:
   state. The step has 5 seconds in a thread of its own; past them, or failing, the pf cut goes on and
   how many were dropped is "unknown", as os-blocklists has it. Without os-xgs-npu, pf alone;
 - **blocked later** - the service remembers the connections it named that could be cut - the latest
-  50,000, for a day; one seen to end, or a UDP question and its answer, not at all - and when an
-  application becomes blocked, those it remembers as it are cut at once and their servers put in its
-  table, so its rule holds them before a new connection to them has to be named. Apply has the service
-  read its settings again (`rc.d/appcontrol reload`, a SIGHUP) rather than restart it, which would forget
-  them;
+  50,000, for a day, some 9 MB at the most as measured here; one seen to end, or a UDP question and its
+  answer, not at all - and when an application becomes blocked, those it remembers as it are cut at
+  once and their servers put in its table, so its rule holds them before a new connection to them has
+  to be named. Apply has the service read its settings again (`rc.d/appcontrol reload`, a SIGHUP) rather
+  than restart it, which would forget them;
 - **handed back** - a connection the coprocessor dropped stays dropped there while its sender goes on
   sending (os-xgs-npu's `hwdrop.py`). `cut.py` writes each one down with its application and its server,
   and `cut.py release` - run by Apply and by the removal - hands back, by their servers, those of an

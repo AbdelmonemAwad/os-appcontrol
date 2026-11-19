@@ -1234,7 +1234,8 @@ check('a window, YouTube blocked: its connection named by its packets, begun her
       ([('YouTube', 'TLS.YouTube', ['192.0.2.10', 51001], ['198.51.100.10', 443], 6, T0 + 2)], 1, {'198.51.100.10'}))
 check('the others remembered for when their application is blocked: DNS of four packets and NetFlix, named and begun; '
       'not one seen to end, a UDP question and its answer - over by now - nor the YouTube connection being cut',
-      sorted((v[0], v[2][0]) for v in state.remembered.values()), [('DNS', '198.51.100.53'), ('TLS.NetFlix', '198.51.100.70')])
+      sorted((v[0], classify.unpacked(k)[2][0]) for k, v in state.remembered.items()),
+      [('DNS', '198.51.100.53'), ('TLS.NetFlix', '198.51.100.70')])
 check('status.json: the applications blocked, what is remembered, what waits for a cut',
       (lambda s: (s['blocking'], s['remembered'], s['waiting_cut'], s['totals']['to_cut']))(state.status()),
       (['YouTube'], 2, 1, 1))
@@ -1267,7 +1268,12 @@ check('put: the servers into pf, counted', (classify.put(state, tables.Pf(run=fa
                                             state.totals['added'] - added_before),
       ((1, 0), {'appcontrol_NetFlix': {'198.51.100.70'}}, 1))
 
-# what is remembered: the latest REMEMBER, for REMEMBER_FOR seconds
+# what is remembered: its two ends packed, the latest REMEMBER, for REMEMBER_FOR seconds
+pk4, pk6 = classify.packed(6, ('192.0.2.10', 51001), ('198.51.100.10', 443)), classify.packed(
+    17, ('2001:db8::10', 51002), ('2001:db8::443', 443))
+check('remembered as its two ends packed - 13 bytes for IPv4, 37 for IPv6 - and read back as they were',
+      (len(pk4), len(pk6), classify.unpacked(pk4), classify.unpacked(pk6)),
+      (13, 37, (6, ('192.0.2.10', 51001), ('198.51.100.10', 443)), (17, ('2001:db8::10', 51002), ('2001:db8::443', 443))))
 kept_most, kept_for = classify.REMEMBER, classify.REMEMBER_FOR
 classify.REMEMBER, classify.REMEMBER_FOR = 3, 600
 try:
@@ -1275,13 +1281,14 @@ try:
     many = [F(('198.51.100.%d' % (100 + i), 443), client=('192.0.2.10', 52000 + i), first=T0 + i) for i in range(5)]
     classify.apply(state, [('named', 'TLS.YouTube', f, row(f, 'TLS.YouTube')) for f in many], tables.Pf(run=FakePf()), aliases,
                    T0 + 70)
-    check('remembered: the latest 3 of 5, the oldest gone first', [v[2][0] for v in state.remembered.values()],
+    check('remembered: the latest 3 of 5, the oldest gone first', [classify.unpacked(k)[2][0] for k in state.remembered],
           ['198.51.100.102', '198.51.100.103', '198.51.100.104'])
     classify.forget_remembered(state, T0 + 3 + 600)
-    check('remembered: none past its time', [v[2][0] for v in state.remembered.values()], ['198.51.100.103', '198.51.100.104'])
+    check('remembered: none past its time', [classify.unpacked(k)[2][0] for k in state.remembered],
+          ['198.51.100.103', '198.51.100.104'])
     again = F(('198.51.100.103', 443), client=('192.0.2.10', 52003), first=T0 + 900)
     classify.remember(state, again, 'TLS.YouTube')
-    check('remembered again: the latest, at the end', [v[4] for v in state.remembered.values()], [T0 + 4, T0 + 900])
+    check('remembered again: the latest, at the end', [v[1] for v in state.remembered.values()], [T0 + 4, T0 + 900])
 finally:
     classify.REMEMBER, classify.REMEMBER_FOR = kept_most, kept_for
 
@@ -1453,7 +1460,7 @@ with tempfile.TemporaryDirectory() as tmp:
            len([line for line in asked if line.startswith('tcpdump')])),
           (['TLS.YouTube'], [('YouTube', ['192.0.2.10', 50001])], True, 1))
     check('read again: YouTube blocked, its connection forgotten as it is cut', (saved['blocking'], state.remembered.get(
-        capture.flow_key(6, '192.0.2.10', 50001, '198.51.100.10', 443))), (['YouTube'], None))
+        classify.packed(6, ('192.0.2.10', 50001), ('198.51.100.10', 443)))), (['YouTube'], None))
 
 # ---------------------------------------------------- nothing it can do at the start: looked at again at a SIGHUP
 with tempfile.TemporaryDirectory() as tmp:

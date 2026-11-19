@@ -74,7 +74,6 @@ import sys
 import syslog
 import time
 import xml.etree.ElementTree as ET
-from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apps                                                              # noqa: E402
@@ -299,7 +298,7 @@ class State:
         self.dropped = 0                # windows dropped as the clock stepped
         self.stopped = None
         self.blocking = {}              # {application: its table}, as last read (tables.blocked())
-        self.remembered = OrderedDict()  # flow key -> (name, client, server, proto, first packet's time)
+        self.remembered = {}            # packed() of its two ends -> (name, first packet's time), oldest first
         self.to_cut = []                # connections waiting for cut.py
         self.last_cut = None
 
@@ -357,22 +356,40 @@ def judge(flows, rows_any, rows_dpi):
     return out, not_judged
 
 
+_PORT = struct.Struct('!H')
+
+
+def packed(proto, client, server):
+    """A connection's protocol and two ends as bytes - the client's address and port, then the server's: 13
+    bytes for IPv4, 37 for IPv6. Remembered so, 50,000 take some 9 MB, where tuples of text took 29."""
+    return (bytes((proto,)) + ipaddress.ip_address(client[0]).packed + _PORT.pack(client[1])
+            + ipaddress.ip_address(server[0]).packed + _PORT.pack(server[1]))
+
+
+def unpacked(key):
+    """(proto, client, server) of packed(), the ends as (address as text, port)."""
+    size = (len(key) - 5) // 2
+    return (key[0], (ipaddress.ip_address(key[1:1 + size]).compressed, _PORT.unpack_from(key, 1 + size)[0]),
+            (ipaddress.ip_address(key[3 + size:3 + 2 * size]).compressed, _PORT.unpack_from(key, 3 + 2 * size)[0]))
+
+
 def remember(state, flow, name):
     """A connection named here that could be cut, remembered: the latest REMEMBER, for REMEMBER_FOR seconds."""
-    state.remembered.pop(flow.key, None)
-    state.remembered[flow.key] = (name, flow.client, flow.server, flow.proto, flow.first)
+    key = packed(flow.proto, flow.client, flow.server)
+    state.remembered.pop(key, None)
+    state.remembered[key] = (sys.intern(name), flow.first)
     while len(state.remembered) > REMEMBER:
-        state.remembered.popitem(last=False)
+        del state.remembered[next(iter(state.remembered))]
 
 
 def forget_remembered(state, now):
     """The connections remembered for longer than REMEMBER_FOR, forgotten - the oldest first."""
     horizon = now - REMEMBER_FOR
     while state.remembered:
-        key, entry = next(iter(state.remembered.items()))
-        if entry[4] >= horizon:
+        key = next(iter(state.remembered))
+        if state.remembered[key][1] >= horizon:
             break
-        state.remembered.pop(key)
+        del state.remembered[key]
 
 
 def queue_cut(state, key, name, client, server, proto, first, app):
@@ -399,10 +416,11 @@ def block(state, aliases, puts):
     blocked = tables.blocked(state.conf, aliases)
     newly = {app: table for app, table in blocked.items() if state.blocking.get(app) != table}
     if newly:
-        for key, (name, client, server, proto, first) in list(state.remembered.items()):
+        for key, (name, first) in list(state.remembered.items()):
             master, app = ndpi.split_name(name)
             hit = app if app in newly else master if master in newly else None
             if hit is not None:
+                proto, client, server = unpacked(key)
                 puts.setdefault(newly[hit], set()).add(server[0])
                 queue_cut(state, key, name, client, server, proto, first, hit)
     state.blocking = blocked
@@ -471,7 +489,8 @@ def apply(state, records, pf, aliases, now):
                         puts.setdefault(table, set()).add(server[0])
                 hit = app if app in blocked else master if master in blocked else None
                 if hit is not None:
-                    queue_cut(state, flow.key, name, flow.client, flow.server, flow.proto, flow.first, hit)
+                    queue_cut(state, packed(flow.proto, flow.client, flow.server), name, flow.client, flow.server,
+                              flow.proto, flow.first, hit)
                 elif not flow.ended and not (flow.proto == capture.UDP and flow.packets <= 2):
                     # a UDP question and its answer - DNS, NTP - is over by the time it is judged, and
                     # would fill what is remembered on a busy network
