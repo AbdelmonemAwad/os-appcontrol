@@ -34,10 +34,28 @@ not put in a table, with the reason.
 A clock that steps - back, or forward past windows not yet closed - drops the windows still open, and
 the windows begin again with the one now; status.json counts the windows dropped.
 
+BLOCKING (phase 2). An application chosen in Blocked applications whose table is in config.xml is
+blocked (tables.blocked()): plugins.inc.d/appcontrol.inc gives its table a block rule, and here a
+connection nDPI names as it - by its packets, begun here, its server one that goes into a table - is
+handed to cut.py once its window is judged, with its two ends, after its server went into the table:
+its pf states killed by those ends, the coprocessor dropping it first where os-xgs-npu is installed.
+cut.py runs beside the capture, one run at a time, so the capture is never held up. A guess, a
+connection whose beginning was not seen, and one whose server goes into no table - the firewall, a host
+of its internal networks, ICMP - are never cut, as they are never put in a table.
+
+The connections named here that could be cut are remembered - the latest REMEMBER, for REMEMBER_FOR
+seconds at most, one seen to end (FIN or RST) not at all - and when an application becomes blocked,
+those remembered as it are cut at once and their servers put in its table, so its block rule holds
+them before a new connection to them has to be named. SIGHUP has the settings read again (rc.d
+appcontrol reload, the page's Apply): the blocked applications among them, the interfaces at the next
+window's close, the installed nDPI's catalogue as aliases.php last read it - without a restart, which
+would forget what is remembered.
+
 What it found goes to /var/db/os-appcontrol: status.json (the page's cards and Applications) and
 unknown.json (the page's Unknown), written after every window. Nothing is held on the firewall: no
-connection waits for its classification. Errors are written there and to the system log, and the
-service goes on: it never fails its caller.
+connection waits for its classification, and an allowed one goes into hardware on os-xgs-npu's own
+schedule. Errors are written there and to the system log, and the service goes on: it never fails its
+caller.
 """
 
 import errno
@@ -55,6 +73,7 @@ import sys
 import syslog
 import time
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apps                                                              # noqa: E402
@@ -79,12 +98,19 @@ RETRY = 30.0                # seconds before a capture that stopped is started a
 RETRY_MOST = 600.0          # it stops again, up to this
 BEHIND = 2                  # windows past their close with none being judged that mean the clock stepped
                             # forward: a window judged past TIMEOUT leaves at most two behind
+CUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cut.py')
+CUT_TIMEOUT = 120           # seconds a cut may take: pf's states read, the hardware step's 5 s, the kills
+CUT_MOST = 5000             # connections one cut takes; the rest wait for the next
+CUT_WAITING = 20000         # connections waiting for a cut at most; past it the oldest are left uncut, and said
+REMEMBER = 50000            # connections named here remembered, for a cut when their application is blocked
+REMEMBER_FOR = 86400        # seconds: pf keeps an established TCP connection a day without a packet
 
 DYNAMIC_V4 = ('dhcp', 'pppoe', 'pptp', 'l2tp', 'ppp')
 DYNAMIC_V6 = ('dhcp6', 'slaac', '6rd', '6to4', 'pppoe')
 NOT_WATCHED = ('lo', 'enc', 'pflog', 'pfsync')
 
 running = True
+reload_asked = False
 
 
 def log(message):
@@ -260,7 +286,8 @@ class State:
         self.watched = watched
         self.windows = 0
         self.totals = {'flows': 0, 'named': 0, 'guessed': 0, 'unknown': 0, 'no_app': 0, 'not_judged': 0,
-                       'not_tabled': 0, 'added': 0, 'refreshed': 0}
+                       'not_tabled': 0, 'added': 0, 'refreshed': 0, 'to_cut': 0, 'cut': 0, 'cut_states': 0,
+                       'cut_dropped': 0}
         self.not_tabled = dict.fromkeys(Network.REASONS, 0)
         self.network = Network()
         self.apps = {}
@@ -270,6 +297,10 @@ class State:
         self.capped = 0
         self.dropped = 0                # windows dropped as the clock stepped
         self.stopped = None
+        self.blocking = {}              # {application: its table}, as last read (tables.blocked())
+        self.remembered = OrderedDict()  # flow key -> (name, client, server, proto, first packet's time)
+        self.to_cut = []                # connections waiting for cut.py
+        self.last_cut = None
 
     def fail(self, message, now=None):
         self.error = {'at': now or time.time(), 'message': message}
@@ -287,6 +318,8 @@ class State:
             'engine': {'version': self.catalogue.get('version'), 'reader': self.catalogue.get('reader'),
                        'categories': len(self.catalogue.get('categories') or {}),
                        'protocols': len(self.catalogue.get('protocols') or {})},
+            'blocking': sorted(self.blocking), 'remembered': len(self.remembered),
+            'waiting_cut': len(self.to_cut), 'last_cut': self.last_cut,
         }
 
     def unknown_rows(self):
@@ -323,14 +356,83 @@ def judge(flows, rows_any, rows_dpi):
     return out, not_judged
 
 
+def remember(state, flow, name):
+    """A connection named here that could be cut, remembered: the latest REMEMBER, for REMEMBER_FOR seconds."""
+    state.remembered.pop(flow.key, None)
+    state.remembered[flow.key] = (name, flow.client, flow.server, flow.proto, flow.first)
+    while len(state.remembered) > REMEMBER:
+        state.remembered.popitem(last=False)
+
+
+def forget_remembered(state, now):
+    """The connections remembered for longer than REMEMBER_FOR, forgotten - the oldest first."""
+    horizon = now - REMEMBER_FOR
+    while state.remembered:
+        key, entry = next(iter(state.remembered.items()))
+        if entry[4] >= horizon:
+            break
+        state.remembered.pop(key)
+
+
+def queue_cut(state, key, name, client, server, proto, first, app):
+    """A connection of a blocked application, for cut.py: forgotten here, as it is being cut."""
+    state.remembered.pop(key, None)
+    state.to_cut.append({'proto': proto, 'client': list(client), 'server': list(server), 'name': name, 'app': app,
+                         'first': first})
+
+
+def trim_cut(state, now):
+    """The connections waiting for cut.py kept to CUT_WAITING, the oldest left uncut - counted, and said."""
+    over = len(state.to_cut) - CUT_WAITING
+    if over > 0:
+        del state.to_cut[:over]
+        state.totals['cut_skipped'] = state.totals.get('cut_skipped', 0) + over
+        state.fail('%d connection(s) of a blocked application left uncut: more were waiting for cut.py than %d'
+                   % (over, CUT_WAITING), now)
+
+
+def block(state, aliases, puts):
+    """The applications blocked now (tables.blocked()). For one blocked since the last look, every connection
+    remembered as it is queued to be cut, and its server put in the application's table - puts, for the
+    caller - so the block rule holds it before a new connection to it has to be named. {application: table}."""
+    blocked = tables.blocked(state.conf, aliases)
+    newly = {app: table for app, table in blocked.items() if state.blocking.get(app) != table}
+    if newly:
+        for key, (name, client, server, proto, first) in list(state.remembered.items()):
+            master, app = ndpi.split_name(name)
+            hit = app if app in newly else master if master in newly else None
+            if hit is not None:
+                puts.setdefault(newly[hit], set()).add(server[0])
+                queue_cut(state, key, name, client, server, proto, first, hit)
+    state.blocking = blocked
+    return blocked
+
+
+def put(state, pf, puts):
+    """puts - {table: addresses} - into pf: (added, refreshed), counted in the totals."""
+    added = refreshed = 0
+    for table in sorted(puts):
+        a, r = pf.update(table, puts[table])
+        added += a
+        refreshed += r
+    state.totals['added'] += added
+    state.totals['refreshed'] += refreshed
+    return added, refreshed
+
+
 def apply(state, records, pf, aliases, now):
     """The records of a window into the state and the tables: the servers of connections nDPI named,
     begun here, into their category's table and their chosen application's - unless state.network
     says why not, which is counted; guesses and unknown connections into the Unknown list, never into
-    a table, and those named by a protocol alone when they were begun here."""
+    a table, and those named by a protocol alone when they were begun here. A connection put in a table
+    whose application - or the protocol carrying it - is blocked is queued to be cut (state.to_cut);
+    one that is not, and was not seen to end, is remembered for when it is."""
     protocols = state.catalogue.get('protocols') or {}
-    chosen = set(state.conf.get('apps') or [])
+    chosen = tables.tabled(state.conf)
     puts = {}
+    waiting = len(state.to_cut)
+    forget_remembered(state, now)
+    blocked = block(state, aliases, puts)
     counts = {'flows': 0, 'named': 0, 'guessed': 0, 'unknown': 0, 'no_app': 0, 'not_tabled': 0}
     for kind, name, flow, row in records:
         counts['flows'] += 1
@@ -366,6 +468,11 @@ def apply(state, records, pf, aliases, now):
                 for table in targets:
                     if table:
                         puts.setdefault(table, set()).add(server[0])
+                hit = app if app in blocked else master if master in blocked else None
+                if hit is not None:
+                    queue_cut(state, flow.key, name, flow.client, flow.server, flow.proto, flow.first, hit)
+                elif not flow.ended:
+                    remember(state, flow, name)
             if begun and ndpi.carried_only(name):
                 counts['no_app'] += 1
                 _unknown(state, 'no_app', name, proto, server, server_name, ja4, iface, now)
@@ -380,17 +487,14 @@ def apply(state, records, pf, aliases, now):
         else:
             counts['unknown'] += 1
             _unknown(state, 'unknown', None, proto, server, server_name, ja4, iface, now)
-    added = refreshed = 0
-    for table in sorted(puts):
-        a, r = pf.update(table, puts[table])
-        added += a
-        refreshed += r
+    added, refreshed = put(state, pf, puts)
     for key in counts:
         state.totals[key] += counts[key]
-    state.totals['added'] += added
-    state.totals['refreshed'] += refreshed
     _keep_latest(state.unknown)
-    counts.update({'added': added, 'refreshed': refreshed, 'tables': len(puts)})
+    to_cut = len(state.to_cut) - waiting
+    state.totals['to_cut'] += to_cut
+    trim_cut(state, now)
+    counts.update({'added': added, 'refreshed': refreshed, 'tables': len(puts), 'to_cut': to_cut})
     return counts
 
 
@@ -659,32 +763,197 @@ class Job:
             self._remove(part)
 
 
-def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
-          catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True,
-          ifconfig=IFCONFIG, mount=MOUNT):
-    """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged). The
-    catalogue of the installed nDPI is read again first, so a package updated since is followed."""
+class Cutter:
+    """cut.py, run on the connections state.to_cut holds - at most CUT_MOST a run - beside the capture and
+    not waited for, one run at a time; its answer, read when it ends, counted in the state. The list goes
+    to it as a file in the work directory, in memory, removed once the run is over; a run past CUT_TIMEOUT
+    is stopped, and its connections are not cut."""
+
+    def __init__(self, work, script=CUT):
+        self.work, self.script = work, script
+        self.proc = None
+        self.batch = []
+        self.started = 0.0
+        self.runs = 0
+        self.paths = ()
+
+    def start(self, state, now):
+        if self.proc is not None or not state.to_cut:
+            return
+        batch, state.to_cut = state.to_cut[:CUT_MOST], state.to_cut[CUT_MOST:]
+        self.runs += 1
+        base = os.path.join(self.work, 'cut-%d' % self.runs)
+        self.paths = (base + '.json', base + '.out')
+        try:
+            write_json(self.paths[0], batch)
+            with open(self.paths[1], 'w') as out:
+                self.proc = subprocess.Popen([self.script, 'cut', self.paths[0]], stdin=subprocess.DEVNULL,
+                                             stdout=out, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.proc = None
+            self._remove()
+            state.fail('%d connection(s) of a blocked application not cut: cut.py could not be run: %s'
+                       % (len(batch), error), now)
+            return
+        self.batch, self.started = batch, time.monotonic()
+
+    def poll(self, state, now):
+        """The run over: its answer counted. True while one runs."""
+        if self.proc is None:
+            return False
+        if self.proc.poll() is None:
+            if time.monotonic() - self.started <= CUT_TIMEOUT:
+                return True
+            self.proc.kill()
+            self.proc.wait()
+            state.fail('cut.py took longer than %d s: %d connection(s) of a blocked application may not be cut'
+                       % (CUT_TIMEOUT, len(self.batch)), now)
+            answer = None
+        else:
+            try:
+                with open(self.paths[1], encoding='utf-8') as handle:
+                    answer = json.load(handle)
+            except (OSError, ValueError):
+                answer = None
+            if not isinstance(answer, dict):
+                state.fail('cut.py said nothing that could be read: %d connection(s) of a blocked application may '
+                           'not be cut' % len(self.batch), now)
+        if isinstance(answer, dict):
+            count_cut(state, answer, len(self.batch), now)
+        self.proc, self.batch = None, []
+        self._remove()
+        return False
+
+    def finish(self, state, now, wait=5.0):
+        """At the service's end: a run going is given `wait` seconds and its answer counted, or it is
+        stopped. What waits for a run is left: the service is ending."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+            state.fail('the service ended while cut.py ran: %d connection(s) of a blocked application may not be cut'
+                       % len(self.batch), now)
+            self.proc, self.batch = None, []
+            self._remove()
+            return
+        self.poll(state, now)
+
+    def _remove(self):
+        for path in self.paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def count_cut(state, answer, asked, now):
+    """cut.py's answer in the state: the connections cut, the pf states killed, those dropped in hardware
+    first, each application's, and what it could not do."""
+    def number(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    state.totals['cut'] += number(answer.get('cut'))
+    state.totals['cut_states'] += number(answer.get('states'))
+    dropped = answer.get('dropped')
+    state.totals['cut_dropped'] += number(dropped)
+    for app, n in (answer.get('apps') or {}).items():
+        entry = state.apps.setdefault(str(app), {'category': None, 'named': 0, 'guessed': 0, 'protocols': [], 'last': 0})
+        entry['cut'] = entry.get('cut', 0) + number(n)
+    state.last_cut = {'at': now, 'asked': asked, 'cut': number(answer.get('cut')),
+                      'states': number(answer.get('states')),
+                      'dropped': dropped if dropped is None or dropped == 'unknown' else number(dropped)}
+    for problem in answer.get('errors') or []:
+        state.fail('the cut: %s' % problem, now)
+
+
+def reread(state, config, catalogue_path):
+    """The settings read again (SIGHUP): the applications blocked among them - looked at here at once, with
+    the aliases as config.xml has them now - and the installed nDPI's catalogue as aliases.php last wrote
+    it. The interfaces follow at the next window's close. {table: addresses} to put in pf."""
+    conf = tables.settings(config)
+    if not conf['read']:
+        state.fail('%s could not be read: the settings stay as they were' % config)
+        return {}
+    catalogue = tables.load_catalogue(catalogue_path)
+    if catalogue.get('categories'):
+        problem = ndpi.protocols_problem(catalogue.get('protocols') or {})
+        if problem:
+            state.fail('the protocols of the installed nDPI cannot be believed (%s): no server goes into a category '
+                       'table' % problem)
+            catalogue = dict(catalogue, protocols={})
+        state.catalogue = catalogue
+    state.conf = conf
+    puts = {}
+    waiting = len(state.to_cut)
+    block(state, tables.present(config), puts)
+    state.totals['to_cut'] += len(state.to_cut) - waiting
+    trim_cut(state, time.time())
+    log('Application Control: settings read again: %d application(s) blocked' % len(state.blocking))
+    return puts
+
+
+def start_state(now, reader, config, catalogue_path, refresh, mount, work):
+    """The service's state as it starts: the settings, the catalogue of the installed nDPI read again first -
+    so a package updated since is followed - the interfaces, and the work directory emptied. Its error is
+    set when there is nothing it can do."""
     conf = tables.settings(config)
     if refresh and ndpi.installed(reader):
         apps.refresh(reader, catalogue_path)
     catalogue = tables.load_catalogue(catalogue_path)
-    watched = interfaces(conf, config)
-    start = now()
-    state = State(start, catalogue, conf, watched)
-    pf = pf or tables.Pf()
+    state = State(now(), catalogue, conf, interfaces(conf, config))
     os.makedirs(work, exist_ok=True)
     for name in os.listdir(work):
         try:
             os.remove(os.path.join(work, name))
         except OSError:
             pass
+    if not conf['classify']:
+        state.fail('classification is off in Settings')
+    elif not ndpi.installed(reader):
+        state.fail('nDPI is not installed: %s is missing (pkg install ndpi)' % reader)
+    elif not catalogue.get('categories'):
+        state.fail('the categories of the installed nDPI are not read yet (apps.py refresh)')
+    elif not in_memory(work, mount):
+        state.fail('%s is not in memory - the rc script mounts a tmpfs there: no window is written to the disk, so '
+                   'nothing is classified' % work)
+    return state
+
+
+def save_state(state, captures, status, unknown):
+    """status.json and unknown.json written."""
+    try:
+        write_json(status, state.status(captures))
+        write_json(unknown, state.unknown_rows())
+    except OSError as error:
+        log('Application Control: %s could not be written: %s' % (status, error))
+
+
+def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
+          catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True,
+          ifconfig=IFCONFIG, mount=MOUNT, cut=CUT):
+    """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged)."""
+    global reload_asked
+    while True:
+        state = start_state(now, reader, config, catalogue_path, refresh, mount, work)
+        if state.error is None:
+            break
+        # nothing to do until Settings or the package change; the service stays, and says why - and looks
+        # again at a SIGHUP, the page's Apply
+        save_state(state, [], status, unknown)
+        while running and stop_after is None and not reload_asked:
+            time.sleep(1)
+        if not running or stop_after is not None:
+            return state
+        reload_asked = False
+    conf, catalogue, watched, start = state.conf, state.catalogue, state.watched, state.since
+    pf = pf or tables.Pf()
+    cutter = Cutter(work, cut)
 
     def save(captures):
-        try:
-            write_json(status, state.status(captures))
-            write_json(unknown, state.unknown_rows())
-        except OSError as error:
-            log('Application Control: %s could not be written: %s' % (status, error))
+        save_state(state, captures, status, unknown)
 
     unread = [False]
 
@@ -697,22 +966,6 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             unread[0] = True
             state.fail('the firewall\'s own addresses could not be read (%s -a): no server goes into a table '
                        'until they are' % ifconfig, t)
-
-    if not conf['classify']:
-        state.fail('classification is off in Settings')
-    elif not ndpi.installed(reader):
-        state.fail('nDPI is not installed: %s is missing (pkg install ndpi)' % reader)
-    elif not catalogue.get('categories'):
-        state.fail('the categories of the installed nDPI are not read yet (apps.py refresh)')
-    elif not in_memory(work, mount):
-        state.fail('%s is not in memory - the rc script mounts a tmpfs there: no window is written to the disk, so '
-                   'nothing is classified' % work)
-    if state.error is not None:
-        # nothing to do until Settings or the package change; the service stays, and says why
-        save([])
-        while running and stop_after is None:
-            time.sleep(5)
-        return state
 
     problem = ndpi.protocols_problem(catalogue.get('protocols') or {})
     if problem:
@@ -731,6 +984,16 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
     job = None
     judged = 0
     while running:
+        if reload_asked:
+            # the settings read again, and an application blocked since cut at once from what is remembered
+            reload_asked = False
+            put(state, pf, reread(state, config, catalogue_path))
+            conf = state.conf
+            for problem in pf.errors:
+                state.fail(problem)
+            pf.errors = []
+            cutter.start(state, now())
+            save(captures)
         live = [c for c in captures if c.proc is not None and c.read_in_window < PACKETS_PER_WINDOW]
         try:
             ready = select.select(live, [], [], 0.5)[0] if live else []
@@ -810,14 +1073,19 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             job.remove()
             job = None
             judged += 1
+            # the servers are in their tables first, so the block rule holds what comes after; then the cut
+            cutter.start(state, now())
             save(captures)
             if stop_after is not None and judged >= stop_after:
                 break
+        if not cutter.poll(state, t):
+            cutter.start(state, t)
     for c in captures:
         c.stop()
     if job is not None:
         job.kill()
         job.remove()
+    cutter.finish(state, now())
     state.stopped = now()
     save(captures)
     return state
@@ -828,6 +1096,12 @@ def stop(signum, frame):
     running = False
 
 
+def read_again(signum, frame):
+    """SIGHUP: the settings are read again at the loop's next turn."""
+    global reload_asked
+    reload_asked = True
+
+
 def main(argv):
     if argv[1:2] != ['run']:
         print('usage: classify.py run', file=sys.stderr)
@@ -835,6 +1109,7 @@ def main(argv):
     syslog.openlog('appcontrol', syslog.LOG_PID, syslog.LOG_DAEMON)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGHUP, read_again)
     try:
         os.makedirs(STATE, mode=0o750, exist_ok=True)
         serve()
