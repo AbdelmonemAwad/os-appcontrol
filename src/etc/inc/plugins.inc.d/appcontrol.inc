@@ -40,13 +40,18 @@ function appcontrol_enabled()
  *                                                     is on
  *
  * Inbound on every interface: a packet a device sends to a server in the table is dropped where it enters
- * the firewall, from a LAN, a VLAN or a VPN alike, before outbound NAT. The firewall's own connections go
- * out, and are not held by it. A table never holds the firewall's own addresses nor those of its internal
- * networks (classify.py), so the rule cannot shut anyone out of the firewall. Priority 1 puts it before the
- * owner's floating, group and interface rules (200000 to 400000, FilterRuleField::getPriority()), as
- * os-blocklists' rules are; quick, so the block is final - an exception for one device is phase 3's (the
- * plan's top-01). It stops new connections only: pf lets a packet of a state it holds through before any
- * rule, so the connections already open are cut by classify.py and cut.py.
+ * the firewall, from a LAN, a VLAN or a VPN alike, before outbound NAT, on every port - another service on
+ * the same address is blocked as well. The firewall's own connections go out, and are not held by it. A
+ * blocked application's table never holds the firewall's own addresses, those of its internal networks,
+ * nor an address that is not on the internet (classify.py), so the rule cannot shut anyone out of the
+ * firewall nor off a host of its own networks; and it takes a server only when the firewall's own resolver
+ * gives that address for the name the connection carried, and nothing named the address as an application
+ * not blocked (cut.py) - a device cannot write a name to an address of its choosing and so have it blocked
+ * for everyone. Priority 1 puts it before the owner's floating, group and interface rules (200000 to
+ * 400000, FilterRuleField::getPriority()), as os-blocklists' rules are; quick, so the block is final - an
+ * exception for one device is phase 3's (the plan's top-01). It stops new connections only: pf lets a
+ * packet of a state it holds through before any rule, so the connections already open are cut by
+ * classify.py and cut.py.
  */
 function appcontrol_firewall(Plugin $fw)
 {

@@ -6,8 +6,9 @@
 # Turn classification on without the settings page - for an image that installs the plugin at first
 # boot - the way the page's Save and Apply does it: classify on in config.xml through the plugin's
 # own model, then the aliases, the filter, cron and the classifier. On is the default already (the
-# plan's svc-5-07); this writes it down and starts it. It changes no traffic: the classifier reads a
-# copy of it.
+# plan's svc-5-07); this writes it down and starts it. Classifying itself changes no traffic - the
+# classifier reads a copy of it - but an application already chosen in Blocked applications (a
+# config.xml restored, say) is blocked once it is on: its block rule loaded, its connections cut.
 #
 #   install/enable.sh        exit 0 when it is on, 1 when the model refused
 set -u
