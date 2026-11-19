@@ -439,7 +439,7 @@
         </table>
         <div class="text-muted ac-note">
             {{ lang._('Connections: named by nDPI from their packets since the classifier started. Guessed: named by port or address only, never put in a table. Each connection counts once, in the window it began in.') }}
-            {{ lang._('Blocked: chosen in Blocked applications. Connections cut: those nDPI named as it, their pf states killed. Packets stopped: dropped by its block rule, which a new connection to a server in its table meets.') }}
+            {{ lang._('Blocked: chosen in Blocked applications. Connections cut: those nDPI named as the application, their pf states killed. Packets stopped: dropped by its block rules on their way to a server in its table.') }}
         </div>
         <table id="grid-categories" class="table table-condensed table-hover table-striped table-responsive">
             <thead>
