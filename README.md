@@ -411,6 +411,16 @@ On 2026-11-20, from the branch of the second part, away from an appliance - its 
   run under node with a stand-in jQuery: the line of what is blocked, with *Cut in hardware* on, off and
   without os-xgs-npu, one chosen and not applied yet, and nothing blocked; the Blocked column.
 
+43 behaviours of the second part were taken out in turn, on a copy, and the tests failed on each: among
+them a connection cut by its server alone, a UDP state cut for a TCP connection, a later connection on
+the same ends cut, the hardware step after the kills or with no deadline, a server still blocked handed
+back, a failed hand-back forgotten, a guess cut, a blocked application's servers not put in its table,
+what is remembered never forgotten, a cut run never stopped, a SIGHUP not acted on, an owner's rule on an
+interface counted as the plugin's, the rules after the owner's or outbound, Apply restarting the
+classifier, and the removal not handing back. The first run had found one of them untested - an owner's
+alias by the plugin's kind of name whose description would have read as an application's - and the
+tests reach it now.
+
 Not run: anything of the second part on an appliance or a plain OPNsense, and its page in a browser.
 
 ## Installation

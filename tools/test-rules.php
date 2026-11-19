@@ -124,8 +124,10 @@ namespace {
         alias('appcontrol_Steam', 'Application Control: Steam', ['type' => 'host']),
         alias('appcontrol_IoT_Scada', 'Application Control: IoT-Scada'),
         alias('office', 'Application Control: Dropbox'),
+        /* the owner's, by the plugin's kind of name, its description as long as the plugin's prefix before "Skype" */
+        alias('appcontrol_Skype', 'My hand-made list of Skype'),
     ];
-    $blocked = 'YouTube,Media,category Media,Netflix,DNS,Steam,IoT-Scada,Dropbox,Zoom';
+    $blocked = 'YouTube,Media,category Media,Netflix,DNS,Steam,IoT-Scada,Dropbox,Zoom,Skype';
 
     /* the rules: YouTube and IoT-Scada, by their aliases; nothing else */
     $all = rules(['classify' => '1', 'blocked' => $blocked, 'block_log' => '0'], $aliases);
@@ -135,8 +137,8 @@ namespace {
     check(array_column($rules, 'descr') === ['Application Control: block YouTube', 'Application Control: block YouTube',
         'Application Control: block IoT-Scada', 'Application Control: block IoT-Scada'],
         'blocked: YouTube and IoT-Scada, by their aliases - two rules each, described with the application\'s name; ' .
-        'none for TikTok (not chosen), a category, Netflix (its alias switched off), DNS (an alias of the owner\'s by ' .
-        'that name), Steam (not External), Dropbox (an alias not of this plugin\'s name), Zoom (no alias yet)');
+        'none for TikTok (not chosen), a category, Netflix (its alias switched off), DNS and Skype (aliases of the ' .
+        'owner\'s by those names), Steam (not External), Dropbox (an alias not of this plugin\'s name), Zoom (no alias yet)');
     check(array_column($rules, 'ipprotocol') === ['inet', 'inet6', 'inet', 'inet6'], 'each family, IPv4 and IPv6');
     $first = $rules[0];
     check($first['to'] === '<appcontrol_YouTube>' && !isset($first['from']), 'from anywhere to the application\'s table');
