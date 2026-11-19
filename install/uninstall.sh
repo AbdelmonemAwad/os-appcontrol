@@ -4,9 +4,10 @@
 # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
 #
 # Remove the Application Control plugin: the classifier stopped, its aliases taken out of
-# Firewall: Aliases - switched off instead where a rule or a setting still names one - its files, its
-# state in /var/db/os-appcontrol, and the addresses its tables held. Kept: the settings in config.xml,
-# and the package ndpi unless install/install.sh installed it and no other package needs it.
+# Firewall: Aliases - switched off instead where a rule or a setting still names one - so its block
+# rules go at the filter reload, what it dropped in hardware handed back, its files, its state in
+# /var/db/os-appcontrol, and the addresses its tables held. Kept: the settings in config.xml, and the
+# package ndpi unless install/install.sh installed it and no other package needs it.
 
 # the classifier and its aliases first, while the files that stop and remove them are there
 /usr/local/etc/rc.d/appcontrol onestop > /dev/null 2>&1 || true
@@ -15,6 +16,9 @@
 /bin/pkill -f 'daemon: [a]ppcontrol\[' 2> /dev/null || true
 /bin/pkill -f '/usr/local/opnsense/scripts/[a]ppcontrol/' 2> /dev/null || true
 configctl appcontrol remove > /dev/null 2>&1 || true
+# with no alias of the plugin's switched on, no application is blocked: every connection a cut dropped on
+# the coprocessor is handed back to the host (os-xgs-npu's hwdrop.py; nothing to do without it)
+configctl appcontrol release > /dev/null 2>&1 || true
 
 NDPI=
 [ -f /usr/local/share/os-appcontrol/ndpi-installed ] && NDPI=ours

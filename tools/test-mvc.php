@@ -136,20 +136,25 @@ namespace {
     Backend::$asked = [];
     check($controller->reconfigureAction() === ['status' => 'failed'] && Backend::$asked === [], 'Apply by GET: refused, nothing asked');
     Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'ok', 'changes' => ['appcontrol_cat_Web: added']]),
-        'appcontrol flush' => json_encode(['killed' => ['appcontrol_cat_Gone'], 'errors' => []])];
+        'appcontrol flush' => json_encode(['killed' => ['appcontrol_cat_Gone'], 'errors' => []]),
+        'appcontrol release' => json_encode(['released' => 2, 'kept' => 1, 'errors' => []])];
     Backend::$asked = [];
     AppControl::$classify = '1';
     $result = (new ServiceController())->reconfigureAction();
     check(Backend::$asked === ['appcontrol apply', 'filter reload skip_alias', 'cron restart', 'appcontrol flush',
-        'appcontrol restart'], 'Apply, classifying on: the aliases, the filter, cron, the tables of aliases gone, the classifier started again');
+        'appcontrol reload', 'appcontrol release'], 'Apply, classifying on: the aliases, the filter and its block rules, cron, ' .
+        'the tables of aliases gone, the classifier\'s settings read again (not a restart, which forgets what it remembers), ' .
+        'then what was dropped in hardware for an application no longer blocked handed back');
     check(($result['status'] ?? '') === 'ok' && $result['classify'] === true && $result['changes'] === ['appcontrol_cat_Web: added'],
         'Apply: what changed passed on to the page');
     check(($result['gone_tables']['killed'] ?? null) === ['appcontrol_cat_Gone'],
         'Apply: the tables of aliases gone, taken out of pf, passed on to the page');
+    check(($result['released']['released'] ?? null) === 2, 'Apply: how many were handed back from hardware, passed on to the page');
     AppControl::$classify = '0';
     Backend::$asked = [];
     (new ServiceController())->reconfigureAction();
-    check(end(Backend::$asked) === 'appcontrol stop', 'Apply, classifying off: the classifier stopped');
+    check(array_slice(Backend::$asked, -2) === ['appcontrol stop', 'appcontrol release'],
+        'Apply, classifying off: the classifier stopped, then everything dropped in hardware handed back - no alias, nothing blocked');
     AppControl::$classify = '1';
     Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'failed', 'errors' => ['refused']])];
     Backend::$asked = [];

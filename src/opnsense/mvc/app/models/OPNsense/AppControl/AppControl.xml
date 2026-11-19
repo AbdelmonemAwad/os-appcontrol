@@ -37,6 +37,23 @@
                 <SortByValue>Y</SortByValue>
             </apps>
             <!--
+                The applications blocked (the plan's svc-2-11): each gets a table as one of Application
+                tables does, a block rule of the plugin's on it (plugins.inc.d/appcontrol.inc), and the
+                connections nDPI names as it cut (classify.py, cut.py). None by default: blocking changes
+                traffic, so nothing is blocked until the owner chooses (the new-plugin standard, 15).
+            -->
+            <blocked type="JsonKeyValueStoreField">
+                <Required>N</Required>
+                <Multiple>Y</Multiple>
+                <ConfigdPopulateAct>appcontrol apps</ConfigdPopulateAct>
+                <SortByValue>Y</SortByValue>
+            </blocked>
+            <!-- each packet the block rules drop logged, under the rule's description; off by default -->
+            <block_log type="BooleanField">
+                <Required>Y</Required>
+                <Default>0</Default>
+            </block_log>
+            <!--
                 The alias's Expire: an address not seen again for this long leaves its table. 3600 s as
                 OPNsense's own virusprot and sshlockout; phase 0's lab (L5) found nothing asking for less.
                 60 is the least the Alias model takes.

@@ -18,6 +18,10 @@
 # would match a sibling plugin's python too. What is running is read from the two pidfiles here,
 # and believed only when the process behind each is ours.
 #
+# reload has the classifier read its settings again as it runs - SIGHUP, to the classifier itself, not
+# to daemon(8) - so it keeps the connections it remembers; or starts it when it is not running. The
+# page's Apply reloads, and so an application blocked there has its connections cut at once.
+#
 # A window's files - the packets kept for ndpiReader and its two CSVs - are written to a tmpfs
 # mounted here at the start and taken down at the stop, never to the disk. classify.py writes one
 # interface's at a time: at most 32 MiB of packets (capture.py's MAX_WINDOW_BYTES) and two CSVs of
@@ -43,6 +47,8 @@ appcontrol_work="/var/db/os-appcontrol/work"
 start_cmd="appcontrol_start"
 stop_cmd="appcontrol_stop"
 status_cmd="appcontrol_status"
+reload_cmd="appcontrol_reload"
+extra_commands="reload"
 
 # The pid in the file $1 when it is alive and is ours - the classifier, or daemon(8) supervising it.
 # daemon(8) writes a pid with no newline, so read's status is not asked: the value decides.
@@ -141,6 +147,22 @@ appcontrol_stop()
 	rm -f "${appcontrol_pid}" "${appcontrol_super}"
 	appcontrol_unmount
 	return 0
+}
+
+# The classifier itself, as its pidfile names it, is told to read its settings again; daemon(8) is not
+# asked, and does not pass a SIGHUP on. Not running - stopped, or between two of daemon(8)'s starts - it is
+# started, which reads them.
+appcontrol_reload()
+{
+	local _pid
+
+	_pid=$(appcontrol_pidof "${appcontrol_pid}")
+	if [ -z "${_pid}" ]; then
+		appcontrol_start
+		return $?
+	fi
+	echo "Reloading ${name}."
+	kill -HUP "${_pid}"
 }
 
 # OPNsense reads this line, looking for "not running" before "is running".

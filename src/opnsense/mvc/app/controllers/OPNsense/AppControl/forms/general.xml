@@ -22,6 +22,18 @@
         <help>A table of its own for each application chosen, appcontrol_ and its name, holding servers it was seen with. Every nDPI category has a table without being chosen: appcontrol_cat_ and its name. The list is the installed nDPI's.</help>
     </field>
     <field>
+        <id>appcontrol.general.blocked</id>
+        <label>Blocked applications</label>
+        <type>select_multiple</type>
+        <help>Each application chosen is blocked: a table of its own, as in Application tables, and a block rule of this plugin's on it before the firewall's own rules, so a new connection from any interface to a server in the table is dropped. A connection nDPI names as it from its packets is cut once its window is judged, 10 to 70 seconds after it began: its pf states killed by its two ends and, with Cut in hardware on in os-xgs-npu's XGS: Settings, dropped on the coprocessor first. Those it named as it before, since the classifier started, are cut at Apply. A guess, a connection whose beginning was not seen, and one to the firewall or a host of its internal networks are never cut. A protocol that carries others - TLS, QUIC, HTTP, DNS - blocks every server it is seen with. None chosen, or classifying off: nothing is blocked.</help>
+    </field>
+    <field>
+        <id>appcontrol.general.block_log</id>
+        <label>Log what is blocked</label>
+        <type>checkbox</type>
+        <help>Log each packet the block rules drop, in Firewall: Log Files: Live View, under the rule's description: Application Control: block and the application's name. Off, they are counted on the Applications tab, not logged.</help>
+    </field>
+    <field>
         <id>appcontrol.general.ttl</id>
         <label>Address expiry (seconds)</label>
         <type>text</type>
