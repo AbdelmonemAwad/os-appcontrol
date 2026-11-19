@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
 #
-"""Application Control's cut: the open connections of a blocked application ended, and what was dropped
-in hardware for one no longer blocked handed back.
+"""Application Control's cut: the open connections of a blocked application ended, their servers put in
+its table when the firewall's own resolver vouches for them, and what was dropped in hardware for one no
+longer blocked handed back.
 
     cut.py cut <file>   cut the connections the JSON file lists, print a JSON summary (classify.py)
     cut.py release      hand back from hardware what was dropped for an application no longer blocked,
@@ -12,13 +13,30 @@ in hardware for one no longer blocked handed back.
 
 A blocked application's block rule (plugins.inc.d/appcontrol.inc) stops new connections to the servers
 in its table, and pf's states keep the connections opened before. classify.py names each connection
-from its first packets; one nDPI names as a blocked application is handed here with its two ends, and
-every pf state of it is killed by its id - the state on the internal interface and the one out of the
-WAN, whose original ends pf writes in parentheses after NAT - as os-xgs-npu's ja4_cut.py and
-os-blocklists' ja4_cut.py cut a connection: both ends in one state, its protocol, and the state made no
-later than the connection's first packet (a later connection on the same two ends is not this one) and
-not over. Not by address: another application on the same server is not cut (the plan's settled point
-5, option a).
+from its first packets; one nDPI names as a blocked application is handed here with its two ends and
+the name it carried - the server name of TLS or QUIC, HTTP's Host - and:
+
+- its server goes into the application's table, whose rule holds every device's new connections to it,
+  only when the firewall's own resolver - the system's, getaddrinfo() - gives that address for that
+  name, and when classify.py did not find the address shared with an application that is not blocked
+  (alone). A device writes the name it sends, and can write any name to any address; the resolver's
+  answer is what the network itself says of the name. A name not answered within RESOLVE_DEADLINE, an
+  address written as a name, and no name at all vouch for nothing. A server nothing vouches for stays
+  out of the table, and that connection alone is cut: the plan's "the block restricted to cutting the
+  connection where it is needed" (settled point 5);
+- every pf state of it is killed by its id - the state on the internal interface and the one out of
+  the WAN, whose original ends pf writes in parentheses after NAT - as os-xgs-npu's ja4_cut.py and
+  os-blocklists' ja4_cut.py cut a connection: both ends in one state, its protocol, not over, and made
+  within SLACK seconds of the connection's first packet, both on the monotonic clock pf counts a state's
+  age on - a later connection on the same two ends is not this one, nor is an earlier one a device sent
+  a packet on to look like it, and a clock that steps changes neither. Not by address: another
+  application on the same server is not cut (settled point 5, option a).
+
+A connection whose application is no longer blocked when the run begins (tables.blocked()) is left, and
+counted. The kills stop once the run has had BUDGET seconds, before classify.py's own limit: the
+connections not reached are given back in the summary (left), and classify.py queues them again. The
+states are looked up by their ends (to_cut()), so a run of 5,000 connections against 100,000 states is
+one pass over each.
 
 Cut in hardware too (the plan's settled point 6): where os-xgs-npu is installed, its hwdrop.drop_ends()
 is called before the first state is killed, once a run with the ends of every state being cut, each
@@ -26,25 +44,32 @@ state's apart and with its protocol. With XGS: Settings "Cut in hardware" on the
 connections at once, both ways; off, it does nothing, and each driver takes a connection out of hardware
 once pf has let go of its state. hwdrop.py is loaded from os-xgs-npu's own place, never copied, and its
 step has HW_DEADLINE seconds in a thread of its own - then the pf cut goes on whatever it is doing, as
-os-blocklists' cut.py and ja4_cut.py do (within(), below). Without os-xgs-npu, pf alone.
+os-blocklists' cut.py and ja4_cut.py do (within(), below). Without os-xgs-npu, pf alone. An os-xgs-npu
+whose hwdrop.py has no release_addresses() - older than 2026-11-17, the drop_ends() of its last release
+taking no protocol - is asked nothing (hardware(): too old): what it dropped could not be handed back.
 
 A connection the coprocessor dropped stays dropped there while its sender goes on sending (os-xgs-npu's
-hwdrop.py, release_addresses()). Each one dropped is written down (DROPPED), with its application and its
-server, and `release` hands back by address those of an application no longer blocked - unchosen, its
-table gone, classifying off, the plugin removed - unless an application still blocked holds the same
-server. The host then decides its frames again: its pf state is gone, so they meet the rules as a new
-connection's.
+hwdrop.py, release_addresses()). The servers whose connections were dropped are written down (DROPPED),
+each with its application and nothing of the device, and `release` hands back by address those of an
+application no longer blocked - unchosen, its table gone, classifying off, the plugin removed - unless an
+application still blocked holds the same server. The host then decides its frames again: its pf state
+is gone, so they meet the rules as a new connection's. With os-xgs-npu gone since, nothing is in hardware
+to hand back, and those are let go; with its hwdrop.py there and not to be used - too old, or failing to
+load - they are kept for the next release.
 
-One run at a time (LOCK). Never fails its caller: what it could not do is in the summary and in the
-system log, under appcontrol.
+DROPPED is read and written under LOCK, one at a time: a cut adds its own at once, a release holds it
+while it hands back. Never fails its caller: what it could not do is in the summary and in the system
+log, under appcontrol.
 """
 
+import collections
 import fcntl
 import importlib.util
 import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import syslog
@@ -60,12 +85,18 @@ LOCK = STATE + '/cut.lock'
 PFCTL = tables.PFCTL
 CONFIG = tables.CONFIG
 HWDROP = '/usr/local/opnsense/scripts/xgs/hwdrop.py'    # os-xgs-npu's, where it is installed
-WAIT = 10               # seconds a run waits for another to end
-SLACK = 5               # seconds a state may be younger than its connection's first packet
-KEEP = 10000            # connections dropped in hardware written down, the latest
+WAIT = 40               # seconds one waits for DROPPED while another holds it: past a release's hardware step
+SLACK = 5               # seconds between a connection's first packet and its state's making, either way
+KEEP = 10000            # servers dropped in hardware written down, the latest
+BUDGET = 90             # seconds a cut kills states for; classify.py stops a run at 120
 PROTOCOLS = {1: 'icmp', 6: 'tcp', 17: 'udp', 58: 'ipv6-icmp'}
 
-HW_DEADLINE = 5         # seconds the hardware step may take; then the pf cut goes on without it
+RESOLVE_DEADLINE = 5    # seconds the names of a run are looked up for, all together
+RESOLVERS = 16          # names looked up at once
+NAMES_MOST = 2000       # names looked up in one run; the connections of any other are cut alone
+
+HW_DEADLINE = 5         # seconds a cut's hardware step may take; then the pf cut goes on without it
+RELEASE_DEADLINE = 30   # seconds a release's may take: it reads the whole flow table, and only Apply waits for it
 UNKNOWN = 'unknown'     # how many a hardware step dropped or handed back, when it was left at its deadline
 _left = []              # the hardware steps left at their deadline, while they still run
 _hwdrop = {}
@@ -99,6 +130,22 @@ def hwdrop(path=None):
             sys.path[:] = saved
     _hwdrop[path] = module
     return module
+
+
+def hardware(path=None):
+    """os-xgs-npu's hwdrop as a cut can use it: ('absent', None) without os-xgs-npu; ('broken', None) when its
+    hwdrop.py does not load; ('old', None) for one with no release_addresses() - os-xgs-npu before
+    2026-11-17, whose drop_ends() takes no protocol and matches nothing given one, and which could not hand
+    back what it dropped; else ('ready', the module)."""
+    path = path or HWDROP
+    if not os.path.isfile(path):
+        return 'absent', None
+    module = hwdrop(path)
+    if module is None:
+        return 'broken', None
+    if not hasattr(module, 'release_addresses') or not hasattr(module, 'drop_ends'):
+        return 'old', None
+    return 'ready', module
 
 
 class HardwareLate(Exception):
@@ -167,9 +214,9 @@ def within(seconds, what, *args):
 def drop_in_hardware(groups):
     """Connections both of whose ends are in one group - (protocol, ends) of one state being cut - dropped
     on the coprocessor by os-xgs-npu's hwdrop: how many; UNKNOWN when the step was left at its deadline or
-    failed, as some may have been dropped by then; None without os-xgs-npu. One call, which reads the
-    whole flow table."""
-    hw = hwdrop()
+    failed, as some may have been dropped by then; None without os-xgs-npu, or with one hardware() does not
+    find ready. One call, which reads the whole flow table."""
+    hw = hardware()[1]
     if hw is None:
         return None
     try:
@@ -180,7 +227,7 @@ def drop_in_hardware(groups):
             'beside it; how many were dropped is not known, the pf cut goes on')
         return UNKNOWN
     except HardwareLate:
-        log('Application Control: dropping in hardware took more than %d s: left there, how many were dropped '
+        log('Application Control: dropping in hardware took more than %g s: left there, how many were dropped '
             'is not known, the pf cut goes on' % HW_DEADLINE)
         return UNKNOWN
     except Exception as error:                                           # noqa: BLE001
@@ -191,16 +238,16 @@ def drop_in_hardware(groups):
 
 def release_in_hardware(addresses):
     """Connections with either end in `addresses` handed back to the host by os-xgs-npu's hwdrop: how many;
-    UNKNOWN when the step was left at its deadline or failed - tried again at the next release; None
-    without os-xgs-npu, or with one older than its release_addresses, which hands nothing back."""
-    hw = hwdrop()
-    if hw is None or not hasattr(hw, 'release_addresses'):
+    UNKNOWN when the step was left at its deadline, RELEASE_DEADLINE, or failed - tried again at the next
+    release; None when hardware() does not find it ready."""
+    hw = hardware()[1]
+    if hw is None:
         return None
     try:
-        n = int(within(HW_DEADLINE, lambda stop: hw.release_addresses(Until(set(addresses), stop))) or 0)
+        n = int(within(RELEASE_DEADLINE, lambda stop: hw.release_addresses(Until(set(addresses), stop))) or 0)
     except HardwareLate:
-        log('Application Control: handing back from hardware took more than %d s or another step still runs: '
-            'tried again at the next release' % HW_DEADLINE)
+        log('Application Control: handing back from hardware took more than %g s or another step still runs: '
+            'tried again at the next release' % RELEASE_DEADLINE)
         return UNKNOWN
     except Exception as error:                                           # noqa: BLE001
         log('Application Control: handing back from hardware failed, tried again at the next release: %s' % error)
@@ -255,36 +302,106 @@ def states(text):
     return out
 
 
+Conn = collections.namedtuple('Conn', 'proto client server began app host alone')
+
+
 def connection(item):
-    """A connection of the file as (protocol name, client end, server end, first packet's time, application),
-    or None for one that cannot be read."""
+    """A connection of the file - its protocol's name, its client end, its server end, its first packet on
+    the monotonic clock (or None), its application, the name it carried, and alone: its server kept out of
+    the table whatever the resolver says - or None for one that cannot be read."""
     try:
         proto = PROTOCOLS.get(int(item['proto']), str(int(item['proto'])))
         client = (ipaddress.ip_address(item['client'][0]).compressed, int(item['client'][1]))
         server = (ipaddress.ip_address(item['server'][0]).compressed, int(item['server'][1]))
-        first = float(item.get('first') or 0) or None
-        return proto, client, server, first, str(item.get('app') or '')
-    except (KeyError, IndexError, TypeError, ValueError):
+        began = item.get('began')
+        return Conn(proto, client, server, None if began is None else float(began), str(item.get('app') or ''),
+                    str(item.get('host') or ''), item.get('alone') is True)
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
         return None
 
 
 def to_cut(conns, all_states, now):
-    """{state id: index of its connection}: every state with both ends of a connection, its protocol, made no
-    later than the connection's first packet and SLACK seconds, and not over."""
+    """{state id: index of its connection}: every state with both ends of a connection and its protocol, not
+    over, made within SLACK seconds of the connection's first packet - now, the connection's began and pf's
+    age all on the monotonic clock. The states are looked up by their ends, indexed once."""
+    by_end = {}
+    for n, (_sid, _proto, ends, _age, over) in enumerate(all_states):
+        if not over:
+            for end in ends:
+                by_end.setdefault(end, []).append(n)
     out = {}
-    for sid, proto, ends, age, over in all_states:
-        if over:
-            continue
-        for i, (want, client, server, first, _app) in enumerate(conns):
-            if want and proto and proto != want:
+    for i, conn in enumerate(conns):
+        want, client, server, began = conn[0], conn[1], conn[2], conn[3]
+        for n in by_end.get(client, ()):
+            sid, proto, ends, age, _over = all_states[n]
+            if sid in out or server not in ends or (want and proto and proto != want):
                 continue
-            if client not in ends or server not in ends:
-                continue
-            if age is not None and first is not None and now - age > first + SLACK:
-                continue    # made after the connection began: a later one on the same two ends
+            if age is not None and began is not None and abs(now - age - began) > SLACK:
+                continue    # made well before or after this connection began: another one on its two ends
             out[sid] = i
-            break
     return out
+
+
+NAME = re.compile(r'^(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$')
+
+
+def name_of(host):
+    """The name a connection carried as the resolver is asked for it - lower case, no last dot, an HTTP
+    Host's port left off - or None: no name, a name of one label, or an address written as a name, which
+    vouches for nothing."""
+    text = (host or '').strip().lower().rstrip('.')
+    if text.count(':') == 1 and text.rsplit(':', 1)[1].isdigit():
+        text = text.rsplit(':', 1)[0]
+    try:
+        ipaddress.ip_address(text.strip('[]'))
+        return None
+    except ValueError:
+        pass
+    return text if len(text) <= 253 and NAME.match(text) else None
+
+
+def lookup(name):
+    """The addresses the firewall's own resolver gives for a name, as the system asks it."""
+    return [info[4][0] for info in socket.getaddrinfo(name, None, 0, socket.SOCK_STREAM)]
+
+
+def resolve(names, deadline=None, ask=None):
+    """{name: {address}} of the names - NAMES_MOST at most - looked up RESOLVERS at a time, in threads of
+    their own, and waited for `deadline` seconds in all (RESOLVE_DEADLINE); a name not answered by then, or
+    failing, gives none. The threads are daemons: one still asking at the deadline ends with the process,
+    which it never holds up."""
+    ask = ask or lookup
+    deadline = RESOLVE_DEADLINE if deadline is None else deadline
+    todo = sorted(names)[:NAMES_MOST]
+    found, guard = {}, threading.Lock()
+
+    def worker():
+        while True:
+            with guard:
+                if not todo:
+                    return
+                name = todo.pop()
+            addresses = set()
+            try:
+                for text in ask(name):
+                    try:
+                        addresses.add(ipaddress.ip_address(str(text).split('%')[0]).compressed)
+                    except ValueError:
+                        pass
+            except Exception:                                            # noqa: BLE001
+                addresses = set()
+            with guard:
+                found[name] = addresses
+
+    workers = [threading.Thread(target=worker, name='appcontrol-resolve', daemon=True)
+               for _ in range(min(RESOLVERS, len(todo)))]
+    for worker_thread in workers:
+        worker_thread.start()
+    until = time.monotonic() + deadline
+    for worker_thread in workers:
+        worker_thread.join(max(0.0, until - time.monotonic()))
+    with guard:
+        return dict(found)
 
 
 def load(path, default):
@@ -303,10 +420,13 @@ def save(path, data):
 
 
 def entries(path=None):
-    """The connections dropped in hardware written down: [{'app', 'server', 'proto', 'client', 'at'}]."""
+    """The servers dropped in hardware written down: [{'app', 'server'}], the oldest first."""
     found = load(path or DROPPED, {})
     rows = found.get('dropped') if isinstance(found, dict) else None
-    return [r for r in rows if isinstance(r, dict) and r.get('server') and r.get('app')] if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        return []
+    return [{'app': str(r['app']), 'server': str(r['server'])} for r in rows
+            if isinstance(r, dict) and r.get('server') and r.get('app')]
 
 
 def keep(rows, path=None):
@@ -321,18 +441,81 @@ def keep(rows, path=None):
             pass
 
 
-def cut(conns, now=None):
-    """The connections' pf states killed by id, the coprocessor dropping them first where os-xgs-npu is
-    installed; what was dropped written down for a release. The summary: connections asked for, cut
-    (a state of theirs killed), states killed, dropped in hardware (a count, UNKNOWN or None), per
-    application, errors."""
-    summary = {'connections': len(conns), 'cut': 0, 'states': 0, 'dropped': None, 'apps': {}, 'errors': []}
-    read = [c for c in (connection(item) for item in conns) if c is not None]
+def write_down(pairs, path=None):
+    """(application, server) pairs dropped in hardware added to what is written down - each once, the latest
+    last - under the lock. A problem, or None."""
+    path = path or DROPPED
+    handle = locked(wait=WAIT)
+    if handle is None:
+        return '%s could not be written: another held it for %d s' % (path, WAIT)
+    with handle:
+        new = sorted(pairs)
+        again = set(new)
+        rows = [r for r in entries(path) if (r['app'], r['server']) not in again]
+        rows.extend({'app': app, 'server': server} for app, server in new)
+        try:
+            keep(rows, path)
+        except OSError as error:
+            return '%s could not be written: %s' % (path, error)
+    return None
+
+
+def kill(sid, summary):
+    """One pf state killed by its id; True when pfctl says it did, what it did not said in the summary."""
+    try:
+        done = subprocess.run([PFCTL, '-k', 'id', '-k', sid], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        summary['errors'].append('pfctl -k id -k %s: %s' % (sid, error))
+        return False
+    if done.returncode != 0:
+        summary['errors'].append('pfctl -k id -k %s ended with status %d' % (sid, done.returncode))
+        return False
+    return True
+
+
+def cut(conns, now=None, ask=None, config=None):
+    """The connections cut, the coprocessor dropping them first where os-xgs-npu is installed, and the
+    servers the resolver vouches for put in their applications' tables first of all. The summary:
+    connections asked for, cut (a state of theirs killed), states killed, dropped in hardware (a count,
+    UNKNOWN or None) and the hardware (hardware()), servers put in their tables (tabled), connections whose
+    server was not (alone), connections left as their application is no longer blocked (unblocked), those
+    the budget did not reach (left, as they were given), per application, errors. now is the monotonic
+    clock's as pf's states are listed, and ask looks a name up (lookup()) - the tests give their own."""
+    started = time.monotonic()
+    config = config or CONFIG
+    summary = {'connections': len(conns), 'cut': 0, 'states': 0, 'dropped': None, 'hardware': None, 'tabled': 0,
+               'alone': 0, 'unblocked': 0, 'left': [], 'apps': {}, 'errors': []}
+    read = [(item, conn) for item, conn in ((item, connection(item)) for item in conns) if conn is not None]
     if len(read) != len(conns):
         summary['errors'].append('%d connection(s) to cut could not be read' % (len(conns) - len(read)))
     if not read:
         return summary
-    listed_at = now if now is not None else time.time()
+    conf = tables.settings(config)
+    if not conf['read']:
+        summary['errors'].append('%s could not be read: nothing cut' % config)
+        return summary
+    still = tables.blocked(conf, tables.present(config))
+    kept = [(item, conn) for item, conn in read if conn.app in still]
+    summary['unblocked'] = len(read) - len(kept)
+    read = kept
+    if not read:
+        return summary
+
+    # the servers the resolver vouches for go into their tables before any state is killed, so that the
+    # rule holds what the devices send after the cut
+    names = {name_of(conn.host) for _, conn in read if not conn.alone} - {None}
+    answers = resolve(names, ask=ask) if names else {}
+    puts = {}
+    for _, conn in read:
+        if not conn.alone and conn.server[0] in answers.get(name_of(conn.host), ()):
+            puts.setdefault(still[conn.app], set()).add(conn.server[0])
+    pf = tables.Pf(pfctl=PFCTL)
+    for table in sorted(puts):
+        pf.update(table, puts[table])
+    summary['errors'].extend(pf.errors)
+    summary['tabled'] = sum(len(servers) for servers in puts.values())
+    summary['alone'] = sum(1 for _, conn in read if conn.server[0] not in puts.get(still[conn.app], ()))
+
     try:
         done = subprocess.run([PFCTL, '-ss', '-vv'], capture_output=True, text=True, errors='replace', timeout=120)
         if done.returncode != 0:
@@ -341,42 +524,44 @@ def cut(conns, now=None):
     except (OSError, subprocess.SubprocessError) as error:
         summary['errors'].append('pf\'s states could not be read, nothing cut: %s' % error)
         return summary
+    listed = time.monotonic() if now is None else now
     all_states = states(text)
-    cuts = to_cut(read, all_states, listed_at)
+    conns_read = [conn for _, conn in read]
+    cuts = to_cut(conns_read, all_states, listed)
     # on the coprocessor first: each state's ends apart, with its protocol, as os-xgs-npu's ja4_cut.py
     # gives them to hwdrop.drop_ends()
     groups = [(proto, ends) for sid, proto, ends, _age, _over in all_states if sid in cuts]
+    summary['hardware'] = hardware()[0]
     dropped = drop_in_hardware(groups) if groups else None
     summary['dropped'] = dropped
+    if dropped == UNKNOWN or (isinstance(dropped, int) and dropped > 0):
+        # which of them the coprocessor dropped is not said, only how many: each server is written down - at
+        # once, so a release meanwhile counts it as held by an application still blocked
+        problem = write_down({(conns_read[i].app, conns_read[i].server[0]) for i in set(cuts.values())})
+        if problem:
+            summary['errors'].append(problem)
+    by_conn = {}
+    for sid, i in cuts.items():
+        by_conn.setdefault(i, []).append(sid)
+    order = sorted(by_conn)
     killed = set()
-    for sid, i in sorted(cuts.items()):
-        try:
-            done = subprocess.run([PFCTL, '-k', 'id', '-k', sid], capture_output=True, timeout=30)
-        except (OSError, subprocess.SubprocessError) as error:
-            summary['errors'].append('pfctl -k id -k %s: %s' % (sid, error))
-            continue
-        if done.returncode != 0:
-            summary['errors'].append('pfctl -k id -k %s ended with status %d' % (sid, done.returncode))
-            continue
-        summary['states'] += 1
-        killed.add(i)
+    for at, i in enumerate(order):
+        if time.monotonic() - started > BUDGET:
+            summary['left'] = [read[j][0] for j in order[at:]]
+            summary['errors'].append('%d connection(s) not reached within %g s: given back to be cut again'
+                                     % (len(order) - at, BUDGET))
+            break
+        for sid in sorted(by_conn[i]):
+            if kill(sid, summary):
+                summary['states'] += 1
+                killed.add(i)
     for i in sorted(killed):
-        app = read[i][4]
+        app = conns_read[i].app
         summary['apps'][app] = summary['apps'].get(app, 0) + 1
     summary['cut'] = len(killed)
-    if dropped == UNKNOWN or (isinstance(dropped, int) and dropped > 0):
-        # which of them the coprocessor dropped is not said, only how many: each is written down
-        rows = entries()
-        for i in sorted(set(cuts.values())):
-            proto, client, server, _first, app = read[i]
-            rows.append({'app': app, 'server': server[0], 'proto': proto, 'client': list(client),
-                         'at': int(listed_at)})
-        try:
-            keep(rows)
-        except OSError as error:
-            summary['errors'].append('%s could not be written: %s' % (DROPPED, error))
-    log('Application Control: %d connection(s) of a blocked application cut, %d pf state(s) killed%s'
-        % (summary['cut'], summary['states'], '' if dropped is None else
+    log('Application Control: %d connection(s) of a blocked application cut, %d pf state(s) killed, %d server(s) '
+        'put in their tables, %d connection(s) cut alone%s'
+        % (summary['cut'], summary['states'], summary['tabled'], summary['alone'], '' if dropped is None else
            ', how many dropped in hardware first not known' if dropped == UNKNOWN else
            ', %d dropped in hardware first' % dropped))
     return summary
@@ -384,34 +569,49 @@ def cut(conns, now=None):
 
 def release(config=None):
     """Hand back from hardware the connections dropped for an application no longer blocked
-    (tables.blocked()), by their servers, less a server an application still blocked holds. The summary:
-    handed back (a count, UNKNOWN or None), connections still written down, errors."""
+    (tables.blocked()), by their servers, less a server an application still blocked holds - holding the
+    lock on what is written down meanwhile. The summary: handed back (a count, UNKNOWN or None), servers
+    still written down, errors."""
     config = config or CONFIG
-    rows = entries()
-    summary = {'released': None, 'kept': len(rows), 'errors': []}
-    if not rows:
+    summary = {'released': None, 'kept': 0, 'errors': []}
+    handle = locked(wait=WAIT)
+    if handle is None:
+        summary['errors'].append('another release is running: nothing handed back')
         return summary
-    conf = tables.settings(config)
-    if not conf['read']:
-        summary['errors'].append('%s could not be read: nothing handed back' % config)
-        return summary
-    still = set(tables.blocked(conf, tables.present(config)))
-    gone = [r for r in rows if r['app'] not in still]
-    if not gone:
-        return summary
-    held = {r['server'] for r in rows if r['app'] in still}
-    addresses = {r['server'] for r in gone} - held
-    released = release_in_hardware(addresses) if addresses else 0
-    summary['released'] = released
-    if released == UNKNOWN:
-        summary['errors'].append('handing back from hardware did not end: tried again at the next release')
-        return summary
-    rows = [r for r in rows if r['app'] in still]
-    try:
-        keep(rows)
-    except OSError as error:
-        summary['errors'].append('%s could not be written: %s' % (DROPPED, error))
-    summary['kept'] = len(rows)
+    with handle:
+        rows = entries()
+        summary['kept'] = len(rows)
+        if not rows:
+            return summary
+        conf = tables.settings(config)
+        if not conf['read']:
+            summary['errors'].append('%s could not be read: nothing handed back' % config)
+            return summary
+        still = set(tables.blocked(conf, tables.present(config)))
+        gone = [r for r in rows if r['app'] not in still]
+        if not gone:
+            return summary
+        found, _hw = hardware()
+        if found in ('old', 'broken'):
+            summary['errors'].append('os-xgs-npu\'s hwdrop.py %s: nothing handed back, kept for the next release'
+                                     % ('has no release_addresses() - too old' if found == 'old'
+                                        else 'could not be loaded'))
+            return summary
+        held = {r['server'] for r in rows if r['app'] in still}
+        addresses = {r['server'] for r in gone} - held
+        released = None if found == 'absent' else release_in_hardware(addresses) if addresses else 0
+        summary['released'] = released
+        if released == UNKNOWN:
+            summary['errors'].append('handing back from hardware did not end within %g s: tried again at the next '
+                                     'release' % RELEASE_DEADLINE)
+            return summary
+        # handed back - or os-xgs-npu gone since, with nothing in hardware to hand back: let go
+        rows = [r for r in rows if r['app'] in still]
+        try:
+            keep(rows)
+        except OSError as error:
+            summary['errors'].append('%s could not be written: %s' % (DROPPED, error))
+        summary['kept'] = len(rows)
     if released:
         log('Application Control: %d connection(s) handed back from hardware: no application blocked holds '
             'their server now' % released)
@@ -444,19 +644,15 @@ def main(argv):
         print(json.dumps({'errors': ['usage: cut.py cut <file> | cut.py release']}))
         return 0
     try:
-        lock = locked()
-        if lock is None:
-            print(json.dumps({'errors': ['another cut or release is running: nothing done']}))
-            return 0
-        with lock:
-            if verb == 'cut':
-                found = load(argv[2], None)
-                if not isinstance(found, list):
-                    print(json.dumps({'errors': ['%s: no list of connections could be read' % argv[2]]}))
-                    return 0
-                print(json.dumps(cut(found)))
-            else:
-                print(json.dumps(release()))
+        if verb == 'cut':
+            # one run at a time is classify.py's: it runs the next once this one has ended
+            found = load(argv[2], None)
+            if not isinstance(found, list):
+                print(json.dumps({'errors': ['%s: no list of connections could be read' % argv[2]]}))
+                return 0
+            print(json.dumps(cut(found)))
+        else:
+            print(json.dumps(release()))
     except Exception as error:                                           # noqa: BLE001
         # said, never raised: the classifier and configd read the answer
         log('Application Control: the cut stopped: %r' % error)
