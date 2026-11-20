@@ -26,16 +26,18 @@ Knowing which application a connection belongs to - with the open nDPI library -
 > application chosen. ~~Nothing is blocked yet.~~ It has run on the second XGS 3300, the XGS 136 and a plain
 > OPNsense: what was run is under [What is tested](#what-is-tested).
 >
-> **The second part, written (2026-11-20), not yet run on an appliance.** An application chosen in
+> **The second part, written (2026-11-20)~~, not yet run on an appliance~~.** An application chosen in
 > Settings' *Blocked applications* is blocked: a block rule of the plugin's on its table stops a new
 > connection to its servers, and each connection nDPI names as it is cut - its pf states killed by its
 > two ends and, where os-xgs-npu is installed with *Cut in hardware* on, dropped on the coprocessor
 > first; what was dropped there is handed back once the application is no longer blocked. A server goes
 > into that table only when the firewall's own resolver gives its address for the name the connection
 > carried: a device cannot have an address of its choosing blocked for everyone by writing a name to
-> it. Nothing is blocked until an application is chosen. Its checks ran away from an appliance (below).
+> it. Nothing is blocked until an application is chosen. Its checks ran away from an appliance, and it ran on
+> the second XGS 3300, the XGS 136 and a plain OPNsense the same day: what was run is under
+> [What is tested](#what-is-tested).
 >
-> **The third part, written (2026-11-20), not yet run on an appliance.** The Rules tab: a rule is an
+> **The third part, written (2026-11-20)~~, not yet run on an appliance~~.** The Rules tab: a rule is an
 > application, a source - any, an interface's network such as the guest network, an alias, an address
 > or a network, or every device but one of them - and Block or Alert. Block puts a block rule of the
 > plugin's on the application's table from that source alone, cuts the connections nDPI names as it
@@ -43,7 +45,9 @@ Knowing which application a connection belongs to - with the open nDPI library -
 > OPNsense's own Intrusion Detection; Alert writes the Suricata rule alone. A Suricata rule matches the
 > names the installed nDPI knows the application by, as nDPI matches them, or its protocol when Suricata
 > reads that protocol itself, on a device's way to the internet alone. After its review, each finding was
-> fixed the same day. Its checks ran away from an appliance (below).
+> fixed the same day. Its checks ran away from an appliance, and it ran on the second XGS 3300, the XGS 136
+> and a plain OPNsense the same day, the 136's boot still to come: what was run is under
+> [What is tested](#what-is-tested).
 
 <p align="center"><b>Contents:</b> <a href="#what-it-does">What it does</a> &middot; <a href="#how-a-connection-is-named">How a connection is named</a> &middot; <a href="#how-an-application-is-blocked">How an application is blocked</a> &middot; <a href="#how-a-rule-of-the-rules-tab-acts">How a rule of the Rules tab acts</a> &middot; <a href="#not-yet-and-why">Not yet, and why</a> &middot; <a href="#what-is-tested">What is tested</a> &middot; <a href="#installation">Installation</a> &middot; <a href="#updates">Updates</a> &middot; <a href="#where-it-fits">Where it fits</a> &middot; <a href="#licence">Licence</a></p>
 
@@ -385,8 +389,9 @@ rule:
   drop out of the protocol map - offered in no Settings list, their servers in no category table.
 - **bytes per application** - counted from pf's states: the research left it on the lab's L4, and it is
   not built.
-- **blocking on an appliance** - the block rules, the cut and the hand-back have run here only, against
-  stand-ins (below), not yet on an XGS or a plain OPNsense. What they rest on was measured elsewhere: a
+- **blocking on an appliance** - ~~the block rules, the cut and the hand-back have run here only, against
+  stand-ins (below), not yet on an XGS or a plain OPNsense.~~ run on 2026-11-20 on the second XGS 3300, the
+  XGS 136 and a plain OPNsense ([What is tested](#what-is-tested)). What they rest on was measured elsewhere: a
   TLS stream in hardware whose pf states were killed by their ids stopped within the two seconds that
   measurement was read in (os-xgs-npu's `docs/measurements/ja4-cut-2026-10-19.md`), and `hwdrop.py`'s
   drop and hand-back stopped and then let through again a 200 Mbit/s stream on the second XGS 3300
@@ -418,13 +423,18 @@ rule:
   an update, `install.sh`.
 - **a category blocked** - an application alone can be chosen, in *Blocked applications* or in a rule of
   the Rules tab; a category's table can be named in a rule of the owner's own.
-- **the Rules tab on an appliance** - its pf rules, its cuts and its Suricata rules have run here only,
+- **the Rules tab on an appliance** - ~~its pf rules, its cuts and its Suricata rules have run here only,
   against stand-ins (below). No Suricata has read the rules file yet: each file is tested by Suricata itself
   on the firewall before it is installed, but whether Suricata 8.0.8, as OPNsense 26.7 builds it, takes every
   line - `quic.sni`, the pcre, the threshold, the 22 protocols - and alerts and drops on them, and what a
-  reload of many lines costs, are the lab's. The checks here run no Suricata: none could be run where they
-  were written, and a check of a Suricata of the runner's, with a `suricata.yaml` guessed at, would judge
-  another build and other parsers than the firewall's own test does.
+  reload of many lines costs, are the lab's.~~ run on 2026-11-20 on the second XGS 3300, the XGS 136 and a
+  plain OPNsense, with the firewall's own Suricata 8.0.8 reading the rules file: every shape of line a rule
+  can take loaded, and it alerted on TLS, QUIC, DNS, HTTP and SSH and dropped in IPS mode ([What is
+  tested](#what-is-tested)). Not run there: the other protocols of the 22 one by one, an interface group as
+  a source (no OpenVPN or WireGuard instance on the lab's boxes), what a reload of many lines costs on a
+  busy firewall, and the XGS 136's boot, which follows. The checks here run no Suricata: none could be run
+  where they were written, and a check of a Suricata of the runner's, with a `suricata.yaml` guessed at,
+  would judge another build and other parsers than the firewall's own test does.
 - **a pass rule** - a rule letting a device through what *Blocked applications* blocks for every device is
   not built: that block comes first and is final, and a pass rule ahead of it would also take that device's
   traffic past every rule of the owner's own. An exception is a block rule whose source is every device but
@@ -701,7 +711,33 @@ os-xgs-npu too old asked all the same, the device written down beside its server
 handed to the cut, SIGHUP's handler set late and a reload that does not mount the tmpfs. The old
 matching, every state against every connection, put back: the timing check alone failed.
 
-Not run: anything of the second part on an appliance or a plain OPNsense, and its page in a browser.
+~~Not run: anything of the second part on an appliance or a plain OPNsense, and its page in a browser.~~
+
+On the appliances and a plain OPNsense, the same day, after one review and one round of its fixes, from the
+branch of the second part, as a user meets it - the second XGS 3300 (steps 1-5 and 7-13 of its lab), the
+XGS 136 (1, 2, 3, 4, 6, 7, 8 and 13) and a plain OPNsense in qemu, without os-xgs-npu (1, 2, 3 and 13) - each
+put back as found after it:
+
+- **a stream named YouTube, then blocked** - remembered and cut at Apply, its states killed, its server
+  tabled; on the wire, the client's interface got 1 MB in the 10 s before and only its other traffic after.
+  Cut at a window's judgement, it was dropped on the coprocessor first (dropped by verdict +1) and no frame
+  of it reached the host in the 15 s after, on both appliances; with *Cut in hardware* off, pf's cut alone
+  stopped it all the same;
+- **forged names** - www.youtube.com written to example.com's address, and a QUIC Initial to Cloudflare's:
+  cut alone, never tabled, example.com still answering;
+- **shared addresses** - a Search front end kept out of the table, and one already in it taken out;
+- **the rest** - a routed private host's SSH session not cut with SSH blocked; `cut.py` on a batch of 13,574
+  pf states in 0.76 s on the XGS 136; the clock stepped 30 s forward, still cut; the classifier started
+  without its tmpfs, the page's Apply mounting it; classifying off, and the removal, leaving no rule, no
+  process and no tmpfs.
+
+Found by that lab and fixed in the branch before it merged: the tables of aliases gone were left in pf at
+Apply and at the removal when the filter reload had not finished. Apply and `uninstall.sh` now wait for pf
+to let go of them; tried again, 100 killed, none left. Recorded as found: at Apply on the second XGS 3300
+nothing is dropped in hardware - the Apply reloads the filter, and os-xgs-npu's hook discards every flow
+in hardware then, so the cut is pf's; on the XGS 136 the flow was still there and was dropped.
+
+Not run: its page in a browser (the pictures, taken with the others).
 
 On 2026-11-20, from the branch of the third part, away from an appliance - its checks, run under Python
 3.14 and PHP 8.5, and those of the first two parts run again beside them, all passing:
@@ -810,8 +846,76 @@ before the fixes:
   grid, each tab's Apply its own answer, the selector's labels made plain once, single host and any kept
   alone; and 16 probes, one for each fix, failing on the branch before the fixes and passing after.
 
-Not run: anything of the third part on an appliance or a plain OPNsense, no Suricata reading its rules
-file, and its page in a browser.
+~~Not run: anything of the third part on an appliance or a plain OPNsense, no Suricata reading its rules
+file, and its page in a browser.~~
+
+On the appliances and a plain OPNsense, the same day, after one review and one round of its fixes, from this
+branch at aabd83a, as a user meets it - the second XGS 3300 (points 1 to 20), the XGS 136 (1, 2, 3, 5, 6, 9,
+11 and 18) and a plain OPNsense in qemu (1, 2, 3, 5, 7, 18 and 21 to 23), driven through the calls the page
+makes, each box put back as found after it:
+
+- **the base rule, Block YouTube from the clients' network** - three pf rules (IPv4 and IPv6 from the
+  interface's network, and `fe80::/10`), "in force" in the grid; `appcontrol.rules` with four lines for
+  each of the nine names nDPI knows YouTube by (36), every destination leaving out the box's own addresses
+  and its networks, every source the network but the box's address there, each sid its own in the
+  plugin's range - on all three;
+- **sources typed by hand** - an IPv4 address in an inet rule alone, an IPv6 network in an inet6 rule alone,
+  an inverted one as `! the address` in IPv4 and from any in IPv6; pf loaded them with no `rules.error`, a
+  change in Firewall: Rules applied after them, and the box's own address was refused as a source - on all
+  three;
+- **Suricata** - in IDS mode on the clients' interface, `installed_rules.yaml` listing the file, Suricata's
+  own test of it loading its 36 lines with none failed, no error of the plugin's in its log; the write with
+  Suricata's test took 0.3 to 0.4 s at Apply and the Intrusion Detection's reload 0.1 to 0.3 s - on all three.
+  Every shape of line a rule can take, 94 lines (the second XGS 3300): all loaded, none failed; a source
+  holding no device's address writes no line and the grid says so;
+- **a device of the source**, on the guests' network - TLS and QUIC alerts in eve.json, one a minute at most,
+  the QUIC Initial's among them; the stream cut 67 to 68 s after its start and counted for its rule; a second
+  connection refused, its server tabled once the resolver vouched for it - on all three. With *Cut in
+  hardware* on, dropped by verdict and no frame of the server's reaching the host in the 15 s after the cut,
+  on both appliances; off, nothing dropped in hardware and pf's cut alone;
+- **a device outside the source** - not cut and no alert; every device but an alias holding the client let
+  the client through (the second XGS 3300 and the plain OPNsense);
+- **where an alert comes from** (the second XGS 3300) - a `dns.query` alert for a question to a public
+  resolver and none for one to the firewall's own; an `http.host` alert for a plain HTTP request;
+- **a protocol**, Alert SSH - one alert a minute for two exchanges with github.com, nothing cut, no pf rule
+  (the second XGS 3300 and the XGS 136); none for an exchange with the firewall itself on the second XGS
+  3300 - on the XGS 136 that exchange could not be made, its SSH not answering on the guests' interface;
+- **sources kept current** (the second XGS 3300) - an alias's new address in the file within 5 minutes (232
+  s); a host alias resolved again by OPNsense, and the file following it (580 s); a refresh with nothing
+  changed reloading nothing. On the plain OPNsense, an IPv6 prefix changed, and the source following it
+  within 5 minutes (188 s);
+- **the tab** (the second XGS 3300 and the XGS 136) - "changed, not applied yet" for a rule added or switched
+  on, pf and the file as before until Apply; a rule deleted acting until Apply, and said so; the line naming
+  the Intrusion Detection's interfaces, and its warning when none of them is internal;
+- **IPS on the plain OPNsense** - in IPS mode on the guests' interface, the firewall's web GUI, SSH, DNS and
+  a DHCP lease and its renewal still answered from that network, and YouTube's TLS handshake to the
+  internet was dropped by Suricata within a second, before any window was judged. With the Intrusion
+  Detection on WAN alone, the firewall's own DNS and NTP answered and nothing alerted on its own addresses;
+- **the Intrusion Detection's own controls** (the second XGS 3300) - a line of the file switched off there
+  stays off, keeping its sid, after another rule is deleted and applied; and a policy of the Intrusion
+  Detection's whose action is drop takes an Alert rule's lines too - they were installed as drop (recorded);
+- **part of a source that cannot be read** (an alias gone, the second XGS 3300) - pf and the file act on the
+  rest, and the last error says so;
+- **the hand-back** (the second XGS 3300) - what two rules dropped in hardware recorded with each rule; at
+  Apply, the deleted rule's row let go - its flow already gone from hardware with the filter reload, as on
+  that appliance it goes - and the other rule's row kept;
+- **its cost** (the second XGS 3300) - a rule of AmazonAWS wrote 8 lines (the fix round had counted 4,896);
+  Apply's write with Suricata's test 0.4 s and the reload 0.2 s; Suricata's resident memory 84,316 KiB
+  before and 84,356 KiB after; the classifier, with three alias rules, 0.2% of one core over 120 s; a
+  refresh with nothing changed 0.6 s, 0.21 s of processor and 23,444 KiB at its peak;
+- **the boot** (the second XGS 3300) - after a reboot, the classifier's start wrote `suricata.json` and the
+  rules file, and `installed_rules.yaml` listed it;
+- **the upgrade from the second part** (the second XGS 3300) - its `pre-deinstall` did nothing under
+  `PKG_UPGRADE`, the classifier restarted on this part's code, the aliases and tables kept with their
+  addresses, the second part's row read as every device's and handed back once YouTube was blocked from a
+  rule's source alone;
+- **the removal** - a rule switched off taking its lines away; classifying off removing the file;
+  `uninstall.sh` leaving no rules file, no pf rule and nothing of the plugin's, Suricata running as before -
+  on all three;
+- **the page** (the second XGS 3300) - every phrase the pictures show in the installed page (17 of 17).
+
+Not run: an interface group as a source (point 12) - no OpenVPN or WireGuard instance on the lab's boxes to
+group; the XGS 136's boot, which follows; and its page in a browser (the pictures, taken with the others).
 
 ## Installation
 
