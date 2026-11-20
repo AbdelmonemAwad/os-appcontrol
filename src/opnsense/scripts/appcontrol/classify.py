@@ -114,7 +114,6 @@ import subprocess                                                        # noqa:
 import sys                                                               # noqa: E402
 import syslog                                                            # noqa: E402
 import time                                                              # noqa: E402
-import xml.etree.ElementTree as ET                                       # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apps                                                              # noqa: E402
@@ -156,9 +155,9 @@ NAMES_EACH = 4              # names kept of each server, the latest
 # firewall. The tests, whose addresses are all documentation ones, put the documentation networks here.
 ALSO_GLOBAL = ()
 
-DYNAMIC_V4 = ('dhcp', 'pppoe', 'pptp', 'l2tp', 'ppp')
-DYNAMIC_V6 = ('dhcp6', 'slaac', '6rd', '6to4', 'pppoe')
-NOT_WATCHED = ('lo', 'enc', 'pflog', 'pfsync')
+DYNAMIC_V4 = tables.DYNAMIC_V4
+DYNAMIC_V6 = tables.DYNAMIC_V6
+NOT_WATCHED = tables.NOT_WATCHED
 
 running = True
 
@@ -177,41 +176,8 @@ def write_json(path, data):
 
 def interfaces(conf, path=CONFIG):
     """[(key, device)] watched: the interfaces chosen in Settings that are switched on; with none chosen,
-    every internal one - switched on, not the WAN, no gateway of its own nor one in System: Gateways, an
-    address of its own that is not obtained from upstream. Read again at each window's close."""
-    try:
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError):
-        return []
-    found = root.find('interfaces')
-    routed = {(g.findtext('interface') or '').strip() for g in root.findall('gateways/gateway_item')}
-    out = []
-    for node in (list(found) if found is not None else []):
-        key, dev = node.tag, (node.findtext('if') or '').strip()
-        if not dev or node.find('enable') is None or dev.startswith(NOT_WATCHED):
-            continue
-        if conf['interfaces']:
-            if key in conf['interfaces']:
-                out.append((key, dev))
-            continue
-        if key == 'wan' or key in routed or node.find('internal_dynamic') is not None:
-            continue
-        if (node.findtext('gateway') or '').strip() or (node.findtext('gatewayv6') or '').strip():
-            continue
-        v4, v6 = (node.findtext('ipaddr') or '').strip(), (node.findtext('ipaddrv6') or '').strip()
-        if v4 in DYNAMIC_V4 or v6 in DYNAMIC_V6:
-            continue
-        if _is_address(v4) or _is_address(v6) or v6 == 'track6':
-            out.append((key, dev))
-    return out
-
-
-def _is_address(text):
-    try:
-        ndpi.ipaddress.ip_address(text)
-        return True
-    except ValueError:
-        return False
+    every internal one (tables.interfaces()). Read again at each window's close."""
+    return tables.interfaces(conf['interfaces'], path)
 
 
 def lan_devices(watched, path=CONFIG):

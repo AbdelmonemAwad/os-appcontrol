@@ -61,7 +61,6 @@ and by which the page tells a rule changed since. Never fails its caller.
 """
 
 import fcntl
-import hashlib
 import ipaddress
 import json
 import os
@@ -141,13 +140,23 @@ def negated(excepted):
     return '![%s]' % ','.join(address(n) for n in excepted)
 
 
+def resolved(rule, devices, by_dev, pf):
+    """{element: tables.resolve()'s answer} of a rule's source, each element once."""
+    return {element: tables.resolve(element, devices, by_dev, pf) for element in dict.fromkeys(rule['source'])}
+
+
 def source(rule, devices, by_dev, pf, own=()):
     """(Suricata's addresses for a rule's source, None, '') - its networks less the firewall's own addresses, every
     address but those when inverted - or (None, why, the element): 'unread' for an element that cannot be read,
     'empty' for a source that holds no address of a device. `own`: the firewall's own addresses."""
+    return source_of(rule, resolved(rule, devices, by_dev, pf), own)
+
+
+def source_of(rule, found, own=()):
+    """source(), from the elements resolved already (resolved())."""
     entries, anything = [], False
     for element in rule['source']:
-        kind, value = tables.resolve(element, devices, by_dev, pf)
+        kind, value = found[element]
         if kind == 'unread':
             return None, 'unread', element
         if kind == 'any':
@@ -200,6 +209,12 @@ def build(conf, catalogue, devices, by_dev, pf, own=()):
         if rule['number'] > MOST_RULES:
             said['reason'] = 'too_many'
             continue
+        # what its source holds now, whether Suricata can tell its application or not: the page says a rule acts on
+        # no device when its source cannot be read or holds no device's address (status.py rules)
+        found = resolved(rule, devices, by_dev, pf)
+        where, why, element = source_of(rule, found, own)
+        said['unread'] = [e for e, (kind, _value) in found.items() if kind == 'unread']
+        said['empty'] = why == 'empty'
         lines = []
         protocol = PROTOCOLS.get(rule['app'])
         if protocol:
@@ -216,7 +231,6 @@ def build(conf, catalogue, devices, by_dev, pf, own=()):
         if len(lines) >= SID_SPAN:
             said['reason'] = 'too_many'
             continue
-        where, why, element = source(rule, devices, by_dev, pf, own)
         if where is None:
             said['reason'], said['element'] = why, element
             continue
@@ -333,17 +347,10 @@ def key(rule):
     return rule['uuid'] or str(rule['number'])
 
 
-def digest(rule):
-    """What a rule puts in force - switched on or off, its action, its application, its source, inverted or not - as
-    a short digest: the page tells a rule changed since the rules were last applied by it (status.py rules)."""
-    what = [bool(rule['enabled']), rule['action'], rule['app'], list(rule['source']), bool(rule['not'])]
-    return hashlib.sha1(json.dumps(what).encode('utf-8')).hexdigest()[:16]
-
-
 def applied_from(conf):
     """What a write applies: whether classifying is on, the rules as config.xml has them, and their digests."""
     return {'classify': bool(conf['classify']), 'rules': conf['rules'],
-            'digests': {key(rule): digest(rule) for rule in conf['rules']}}
+            'digests': {key(rule): tables.digest(rule) for rule in conf['rules']}}
 
 
 RULE_KEYS = {'number': int, 'uuid': str, 'enabled': bool, 'action': str, 'app': str, 'source': list, 'not': bool,

@@ -70,7 +70,8 @@ def running(pidfile=PIDFILE, runs='classify.py run'):
 
 def ids(config=tables.CONFIG, pidfile=SURICATA_PIDFILE):
     """OPNsense's Intrusion Detection, as the Suricata rules of the Rules tab meet it: switched on, its mode - IPS
-    (netmap, divert), where a drop drops, or IDS (pcap), where it alerts - the interfaces it reads, and whether
+    (netmap, divert), where a drop drops, or IDS (pcap), where it alerts - the interfaces it reads, by their names
+    too, those of them that are internal - where Suricata sees a device's own address, before NAT - and whether
     Suricata runs."""
     try:
         general = ET.parse(config).getroot().find('OPNsense/IDS/general')
@@ -80,41 +81,77 @@ def ids(config=tables.CONFIG, pidfile=SURICATA_PIDFILE):
     def text(tag, default=''):
         return ((general.findtext(tag) if general is not None else None) or default).strip()
 
+    reads = [i for i in text('interfaces').split(',') if i]
+    names = tables.interface_names(config)
+    internal = {key for key, _dev in tables.interfaces([], config)}
     return {'enabled': text('enabled', '0') == '1', 'mode': 'ips' if text('mode', 'pcap') in ('netmap', 'divert') else 'ids',
-            'interfaces': [i for i in text('interfaces').split(',') if i], 'running': running(pidfile, 'suricata') is not None}
+            'interfaces': reads, 'names': [names.get(i, i.upper()) for i in reads],
+            'internal': [i for i in reads if i in internal], 'running': running(pidfile, 'suricata') is not None}
+
+
+def rule_state(rule, conf, applied, said, known, table):
+    """What a rule of the Rules tab does now (rules())."""
+    key = rule['uuid'] or str(rule['number'])
+    if not conf['classify']:
+        return 'off'
+    if applied is not None:
+        before = applied.get(key)
+        was_on = before is not None and before['enabled']
+        if tables.digest(rule) != (tables.digest(before) if before is not None else None) and (rule['enabled'] or was_on):
+            return 'changed'
+    if not rule['enabled']:
+        return 'disabled'
+    if known and rule['app'] not in known:
+        return 'unknown_app'
+    if not table:
+        return 'pending'
+    unread = said.get('unread') if isinstance(said.get('unread'), list) else []
+    if unread and (rule['not'] or set(unread) >= set(rule['source'])):
+        return 'unread'
+    if said.get('empty') is True:
+        return 'empty'
+    return 'active'
 
 
 def rules(config=tables.CONFIG, status_path=STATUS, suricata_path=SURICATA, catalogue_path=tables.CATALOGUE,
           ids_pidfile=SURICATA_PIDFILE):
-    """The Rules tab: {'rules': {uuid: {'state', 'table', 'cut', 'suricata'}}, 'ids': ids(), 'suricata': when the rules
-    file was last written and its lines}. A rule's state: 'off' - classifying off; 'disabled' - switched off;
-    'unknown_app' - an application the installed nDPI does not know; 'pending' - its application's table not
-    made yet, Apply not run since; 'active'. cut: the connections cut for it since the classifier started;
-    suricata: what suricata_rules.py last wrote for it - its lines, or why none."""
+    """The Rules tab: {'rules': {uuid: {'state', 'table', 'cut', 'suricata'}}, 'gone', 'ids': ids(), 'suricata': when
+    the rules file was last written and its lines}. A rule's state, against what the last Apply put in force -
+    the rules suricata_rules.py kept as it applied them, with their digests (tables.digest()): 'off' - classifying
+    off; 'changed' - saved since and not applied yet: pf, the cut and Suricata still act as before; 'disabled' -
+    switched off; 'unknown_app' - an application the installed nDPI does not know; 'pending' - its application's
+    table not made, Apply needed; 'unread' - its source cannot be read now, inverted or every element of it, so
+    it acts on no device; 'empty' - its source holds no device's address now; 'active'. gone: the rules applied
+    and switched on that are deleted since - they act until Apply. cut: the connections cut for it since the
+    classifier started; suricata: what suricata_rules.py last wrote for it - its lines, or why none."""
     conf = tables.settings(config)
     aliases = tables.present(config)
     known = (tables.load_catalogue(catalogue_path).get('protocols') or {})
     cut = (load(status_path, {}) or {}).get('rule_cut') or {}
     written = load(suricata_path, {}) or {}
     said = written.get('rules') or {}
+    applied = None
+    kept = written.get('applied')
+    if isinstance(kept, dict) and isinstance(kept.get('rules'), list):
+        applied = {}
+        for rule in kept['rules']:
+            try:
+                applied[rule['uuid'] or str(rule['number'])] = rule
+                tables.digest(rule)
+            except (KeyError, TypeError):
+                applied = None
+                break
     out = {}
     for rule in conf['rules']:
         key = rule['uuid'] or str(rule['number'])
         table = tables.table_for_app(rule['app'], aliases) if rule['app'] else None
-        if not conf['classify']:
-            state = 'off'
-        elif not rule['enabled']:
-            state = 'disabled'
-        elif known and rule['app'] not in known:
-            state = 'unknown_app'
-        elif not table:
-            state = 'pending'
-        else:
-            state = 'active'
-        out[key] = {'number': rule['number'], 'state': state, 'table': table or '',
-                    'cut': cut.get(key, 0) if isinstance(cut.get(key, 0), int) else 0,
-                    'suricata': said.get(key) if isinstance(said.get(key), dict) else None}
-    return {'rules': out, 'ids': ids(config, ids_pidfile),
+        found = said.get(key) if isinstance(said.get(key), dict) else None
+        out[key] = {'number': rule['number'], 'state': rule_state(rule, conf, applied, found or {}, known, table),
+                    'table': table or '', 'cut': cut.get(key, 0) if isinstance(cut.get(key, 0), int) else 0,
+                    'suricata': found}
+    gone = sum(1 for key, rule in (applied or {}).items() if key not in out and rule['enabled']) \
+        if conf['classify'] and applied is not None and kept.get('classify') is True else 0
+    return {'rules': out, 'gone': gone, 'ids': ids(config, ids_pidfile),
             'suricata': {'at': written.get('at'), 'lines': written.get('lines', 0), 'errors': written.get('errors') or []}}
 
 

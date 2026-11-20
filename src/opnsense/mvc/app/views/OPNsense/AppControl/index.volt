@@ -371,17 +371,21 @@
 
         /*
          * The Rules tab: each rule - its action, its source, an interface's network by the interface's name - and
-         * what it does now: acting, not applied yet, switched off; the connections cut for it; its Suricata
-         * lines, or why it has none. Under it, the Intrusion Detection's state, which decides what a Suricata
-         * rule does.
+         * what it does now, against what the last Apply put in force: acting, changed and not applied yet,
+         * switched off, acting on no device as its source cannot be read or holds none; the connections cut for
+         * it; its Suricata lines, or why it has none. Under it, the Intrusion Detection's state, which decides what
+         * a Suricata rule does, and the rules deleted that act until Apply.
          */
         const actions = {'block': "{{ lang._('Block') }}", 'alert': "{{ lang._('Alert') }}"};
         const rule_states = {
             'active': "{{ lang._('in force') }}",
+            'changed': "{{ lang._('changed, not applied yet') }}",
             'pending': "{{ lang._('not applied yet') }}",
             'disabled': "{{ lang._('switched off') }}",
             'off': "{{ lang._('classifying is off') }}",
-            'unknown_app': "{{ lang._('an application the installed nDPI does not know') }}"
+            'unknown_app': "{{ lang._('an application the installed nDPI does not know') }}",
+            'unread': "{{ lang._('its source cannot be read now: it acts on no device') }}",
+            'empty': "{{ lang._('its source holds no device\'s address now: it acts on none') }}"
         };
         const suricata_reasons = {
             'no_match': "{{ lang._('no Suricata rule: Suricata cannot tell this application') }}",
@@ -419,6 +423,10 @@
                     },
                     state: function (column, row) {
                         const parts = [esc(rule_states[row.state] || '-')];
+                        if (row.state === 'changed') {
+                            /* what it says of Suricata and the cut is what the last Apply put in force, not this */
+                            return parts[0];
+                        }
                         if (row.state === 'active' && row.action_key === 'block') {
                             parts.push(count(row.cut) + ' ' + "{{ lang._('connections cut') }}");
                         }
@@ -431,22 +439,35 @@
                     }
                 }
             }
+        }).on('loaded.rs.jquery.bootgrid', function () {
+            /* a rule added, changed or deleted: the line of the rules deleted since the last Apply with it */
+            rules_state();
         });
 
-        /* what the Intrusion Detection does with the Suricata rules of the Rules tab */
+        /* what the Intrusion Detection does with the Suricata rules of the Rules tab, on which interfaces - and
+           whether one of them is internal, where Suricata sees a device's own address; and the rules deleted since
+           the last Apply, which act until the next */
         function draw_ids(data) {
             const ids = data && data.ids ? data.ids : null;
+            const names = ids && Array.isArray(ids.names) && ids.names.length ? ids.names.join(', ') : '-';
             let text = '';
             if (ids && !ids.enabled) {
-                text = "{{ lang._('Intrusion Detection is off: the Suricata rules of the Rules tab wait for it.') }}";
+                text = plain("{{ lang._('Intrusion Detection is off: the Suricata rules of the Rules tab wait for it.') }}");
             } else if (ids && !ids.running) {
-                text = "{{ lang._('Intrusion Detection is on, but Suricata is not running.') }}";
+                text = plain("{{ lang._('Intrusion Detection is on, but Suricata is not running.') }}");
             } else if (ids && ids.mode === 'ips') {
-                text = "{{ lang._('Intrusion Detection runs in IPS mode: the Suricata rule of a Block rule drops what it matches, and alerts.') }}";
+                text = plain("{{ lang._('Intrusion Detection runs in IPS mode on %s: the Suricata rule of a Block rule drops what it matches, and alerts.') }}").replace('%s', names);
             } else if (ids) {
-                text = "{{ lang._('Intrusion Detection runs in IDS mode: the Suricata rules alert, and drop nothing.') }}";
+                text = plain("{{ lang._('Intrusion Detection runs in IDS mode on %s: the Suricata rules alert, and drop nothing.') }}").replace('%s', names);
             }
-            $('#ac-ids').text(plain(text)).toggle(text !== '');
+            if (ids && ids.enabled && Array.isArray(ids.interfaces) && ids.interfaces.length &&
+                    !(Array.isArray(ids.internal) && ids.internal.length)) {
+                text += ' ' + plain("{{ lang._('None of them is an internal interface: after NAT, Suricata sees no device\'s own IPv4 address there.') }}");
+            }
+            $('#ac-ids').text(text).toggle(text !== '');
+            const gone = data && Number(data.gone) > 0 ? Number(data.gone) : 0;
+            $('#ac-rules-gone').text(plain("{{ lang._('Rules deleted since the last Apply, which act until Apply: %s') }}").replace('%s', count(gone)))
+                .toggle(gone > 0);
         }
 
         function rules_state() {
@@ -611,7 +632,7 @@
         </div>
     </div>
     <div id="rules" class="tab-pane">
-        <table id="grid-rules" class="table table-condensed table-hover table-striped table-responsive" data-editDialog="DialogRule">
+        <table id="grid-rules" class="table table-condensed table-hover table-striped table-responsive" data-editDialog="DialogRule" data-editAlert="ruleChangeMessage">
             <thead>
                 <tr>
                     <th data-column-id="uuid" data-type="string" data-identifier="true" data-visible="false">{{ lang._('ID') }}</th>
@@ -639,6 +660,12 @@
             {{ lang._('Each rule acts on its application for the devices of its source. Block: a block rule of this plugin\'s on the application\'s table, from that source alone and ahead of the rules of Firewall: Rules; the connections nDPI names as the application from there cut, in hardware too where os-xgs-npu is installed; and a Suricata rule. Alert: a Suricata rule alone, which alerts. Every device but those of a source: invert it - a block for all but one device, say.') }}
             {{ lang._('The Suricata rules go to the Intrusion Detection\'s own local rules: one for each name the installed nDPI knows the application by - in the server name of TLS and QUIC, the Host of HTTP and the name a DNS question asks for - and one for its protocol when Suricata reads that protocol itself. Suricata sees a device\'s own address on an internal interface it reads, before NAT; its alerts are in Services: Intrusion Detection.') }}
             <span id="ac-ids" style="display: none;"></span>
+            <span id="ac-rules-gone" class="text-warning" style="display: none;"></span>
+        </div>
+        <div class="ac-note">
+            <div id="ruleChangeMessage" class="alert alert-info" style="display: none" role="alert">
+                {{ lang._('After changing settings, please remember to apply them with the button below') }}
+            </div>
         </div>
         <div class="ac-apply">
             <button class="btn btn-primary" id="applyRulesAct" type="button"><b>{{ lang._('Apply') }}</b> <i id="rules_progress"></i></button>

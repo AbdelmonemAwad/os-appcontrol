@@ -279,6 +279,15 @@ check('each rule: YouTube from the guests - its 9 names, 4 places each; SSH - it
       {'1': (36, 9, None, None), '2': (1, 0, 'ssh', None), '3': (0, 0, None, 'disabled'), '4': (0, 0, None, 'no_match'),
        '5': (0, 9, None, 'unread'), '6': (1, 0, 'tls', None), '7': (0, 0, None, 'too_many')})
 check('a source not read: which element', report[U[5]].get('element'), 'Gone')
+_built, said_more = sr.build({'rules': [rule(number=1, uuid=U[1], app='Example_Env', source=['Gone']),
+                                        rule(number=2, uuid=U[2], app='YouTube', source=['opt3']),
+                                        rule(number=3, uuid=U[3], app='YouTube', source=['opt2', 'Gone'])]},
+                             CATALOGUE, DEVICES, BY_DEV, PF, OWN)
+check('for the page, for every rule switched on - one Suricata cannot tell too: the elements of its source not read, and '
+      'whether it holds no device\'s address now', ([(report[k].get('unread'), report[k].get('empty')) for k in (U[1], U[5])],
+                                                     [(said_more[k]['reason'], said_more[k]['unread'], said_more[k]['empty'])
+                                                      for k in (U[1], U[2], U[3])]),
+      ([([], False), (['Gone'], False)], [('no_match', ['Gone'], False), ('empty', [], True), ('unread', ['Gone'], False)]))
 youtube = built[0]
 check('Block: drop, from the guests\' network but the firewall\'s address there; Alert: alert, from every address but '
       'the firewall\'s; the source said in each rule\'s comment',

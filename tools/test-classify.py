@@ -2151,9 +2151,10 @@ with tempfile.TemporaryDirectory() as tmp:
           {'1': ('active', 'appcontrol_YouTube', 4, 37, None), '2': ('active', 'appcontrol_NetFlix', 0, None, None),
            '3': ('disabled', '', 0, None, None), '4': ('unknown_app', '', 0, 0, 'unread'), '5': ('disabled', '', 0, None, None),
            '6': ('disabled', '', 0, None, None)})
-    check('status.py rules: the Intrusion Detection - on, IPS (netmap), its interfaces, Suricata not running; the rules '
-          'file\'s lines', (found['ids'], found['suricata']['lines']),
-          ({'enabled': True, 'mode': 'ips', 'interfaces': ['lan', 'opt2'], 'running': False}, 37))
+    check('status.py rules: the Intrusion Detection - on, IPS (netmap), its interfaces and their names, none of them internal '
+          'here, Suricata not running; the rules file\'s lines', (found['ids'], found['suricata']['lines']),
+          ({'enabled': True, 'mode': 'ips', 'interfaces': ['lan', 'opt2'], 'names': ['LAN', 'OPT2'], 'internal': [],
+            'running': False}, 37))
     with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
         json.dump({'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TLS': 'Web'}}, handle)
     found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'none.json'), os.path.join(tmp, 'ndpi.json'),
@@ -2163,7 +2164,52 @@ with tempfile.TemporaryDirectory() as tmp:
           ('pending', 0, None, 0))
     check('status.py rules: the Intrusion Detection off, or IDS mode (pcap) - said', [status.ids(c, os.path.join(tmp, 'none.pid'))
                                                                                        for c in (os.path.join(tmp, 'none.xml'),)],
-          [{'enabled': False, 'mode': 'ids', 'interfaces': [], 'running': False}])
+          [{'enabled': False, 'mode': 'ids', 'interfaces': [], 'names': [], 'internal': [], 'running': False}])
+
+    # against what the last Apply put in force: the rules suricata_rules.py kept as it applied them
+    now_rules = tables.settings(config)['rules']
+    kept_rules = [dict(r) for r in now_rules if r['number'] != 2]       # rule 2, NetFlix, added since
+    kept_rules[0]['source'] = ['lan']                                   # rule 1 applied from the LAN, changed since
+    kept_rules[1]['enabled'] = True                                     # rule 3 applied switched on, off since
+    kept_rules.append(dict(kept_rules[0], uuid='aaaaaaaa-0000-4000-8000-000000000009', number=9))   # deleted since
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'at': T0, 'lines': 0, 'rules': {}, 'applied': {'classify': True, 'rules': kept_rules}, 'errors': []},
+                  handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules, against what was applied: a rule\'s source changed, a rule added, one switched off since - '
+          'changed, not applied yet, pf and Suricata acting as before; one applied as it is - as it was; one switched off '
+          'then and now - switched off; and the rule deleted since, still acting until Apply, counted',
+          ({k[-1]: v['state'] for k, v in found['rules'].items()}, found['gone']),
+          ({'1': 'changed', '2': 'changed', '3': 'changed', '4': 'pending', '5': 'disabled', '6': 'disabled'}, 1))
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'rules': {R1: {'lines': 0, 'reason': 'unread', 'unread': ['opt2'], 'empty': False},
+                             R2: {'lines': 0, 'reason': 'empty', 'unread': [], 'empty': True}},
+                   'applied': {'classify': True, 'rules': now_rules}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules: a rule in force whose source cannot be read now - an alias gone - acts on no device; one whose '
+          'source holds no device\'s address now - an interface without one - neither; nothing deleted since',
+          (found['rules'][R1]['state'], found['rules'][R2]['state'], found['gone']), ('unread', 'empty', 0))
+    youtube_rule = now_rules[0]
+    check('status.py rules: part of a source not read - the rest acts; inverted, one element not read - it acts on none',
+          [status.rule_state(dict(youtube_rule, source=s, **{'not': n}), {'classify': True}, None, {'unread': u},
+                             {'YouTube': 'Media'}, 'appcontrol_YouTube')
+           for s, n, u in ((['opt2', 'Kids'], False, ['Kids']), (['Kids'], True, ['Kids']), (['opt2', 'Kids'], False, []))],
+          ['active', 'unread', 'active'])
+    ids_on = []
+    for reads in ('wan', 'lan,opt2'):
+        with open(config, 'w') as handle:
+            handle.write('<opnsense><interfaces><wan><enable>1</enable><if>em0</if><descr>WAN</descr><ipaddr>dhcp</ipaddr>'
+                         '</wan><lan><enable>1</enable><if>em1</if><ipaddr>192.0.2.1</ipaddr></lan><opt2><enable>1</enable>'
+                         '<if>em2</if><descr>GUEST</descr><ipaddr>198.51.100.129</ipaddr></opt2></interfaces><OPNsense><IDS>'
+                         '<general><enabled>1</enabled><mode>pcap</mode><interfaces>%s</interfaces></general></IDS></OPNsense>'
+                         '</opnsense>' % reads)
+        found = status.ids(config, os.path.join(tmp, 'none.pid'))
+        ids_on.append((found['names'], found['internal']))
+    check('status.py rules: the Intrusion Detection on the WAN alone - by its name, no internal interface among them, where '
+          'Suricata sees no device\'s own address after NAT; on the LAN and the guests - both internal',
+          ids_on, [(['WAN'], []), (['LAN', 'GUEST'], ['lan', 'opt2'])])
     with open(os.path.join(tmp, 'suricata.pid'), 'w') as handle:
         handle.write(str(os.getpid()))
     check('status.py rules: a pidfile naming a live process that is not Suricata - not running',

@@ -243,6 +243,70 @@ def covers(wider, narrower):
     return narrower <= wider
 
 
+DYNAMIC_V4 = ('dhcp', 'pppoe', 'pptp', 'l2tp', 'ppp')
+DYNAMIC_V6 = ('dhcp6', 'slaac', '6rd', '6to4', 'pppoe')
+NOT_WATCHED = ('lo', 'enc', 'pflog', 'pfsync')
+
+
+def _is_address(text):
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
+def interfaces(chosen, path=CONFIG):
+    """[(key, device)] of the interfaces chosen that are switched on; with none chosen, every internal one -
+    switched on, not the WAN, no gateway of its own nor one in System: Gateways, an address of its own that is not
+    obtained from upstream. The classifier watches these (classify.py), and Suricata sees a device's own address on
+    them, before NAT (status.py rules)."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    found = root.find('interfaces')
+    routed = {(g.findtext('interface') or '').strip() for g in root.findall('gateways/gateway_item')}
+    out = []
+    for node in (list(found) if found is not None else []):
+        key, dev = node.tag, (node.findtext('if') or '').strip()
+        if not dev or node.find('enable') is None or dev.startswith(NOT_WATCHED):
+            continue
+        if chosen:
+            if key in chosen:
+                out.append((key, dev))
+            continue
+        if key == 'wan' or key in routed or node.find('internal_dynamic') is not None:
+            continue
+        if (node.findtext('gateway') or '').strip() or (node.findtext('gatewayv6') or '').strip():
+            continue
+        v4, v6 = (node.findtext('ipaddr') or '').strip(), (node.findtext('ipaddrv6') or '').strip()
+        if v4 in DYNAMIC_V4 or v6 in DYNAMIC_V6:
+            continue
+        if _is_address(v4) or _is_address(v6) or v6 == 'track6':
+            out.append((key, dev))
+    return out
+
+
+def interface_names(path=CONFIG):
+    """{interface: the name the firewall's pages give it} - its description, or its key in capitals."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    found = root.find('interfaces')
+    return {node.tag: (node.findtext('descr') or '').strip() or node.tag.upper()
+            for node in (list(found) if found is not None else [])}
+
+
+def digest(rule):
+    """What a rule of the Rules tab puts in force - switched on or off, its action, its application, its source,
+    inverted or not - as a short digest: suricata_rules.py keeps those of the rules it applied, and status.py tells by
+    them a rule changed since and not applied yet."""
+    what = [bool(rule['enabled']), rule['action'], rule['app'], list(rule['source']), bool(rule['not'])]
+    return hashlib.sha1(json.dumps(what).encode('utf-8')).hexdigest()[:16]
+
+
 def interface_devices(path=CONFIG):
     """{interface: its device} of every interface in config.xml - lan: em1, opt2: vlan02 - the names a rule's
     source takes for an interface's network."""
