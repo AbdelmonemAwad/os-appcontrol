@@ -327,6 +327,17 @@ comments = [line for line in text.splitlines() if line.startswith('# rule ')]
 check('rendered: a comment line for each rule, then its lines - 38 - and nothing between them',
       (comments, len(lines), '' in text.rstrip('\n').splitlines()),
       (['# rule 1: block YouTube from opt2', '# rule 2: alert SSH from any', '# rule 6: block TLS from not Teachers'], 38, False))
+BROKEN_APP = 'SSH\ndrop ip any any -> any any (sid:1;)'
+BROKEN_SOURCE = 'opt2\nalert ip any any -> any any (sid:2;)'
+broken, _said = sr.build({'rules': [rule(number=1, uuid=U[1], app=BROKEN_APP, source=[BROKEN_SOURCE])]},
+                         dict(CATALOGUE, hosts={BROKEN_APP: ['ssh.example']}), dict(DEVICES, **{BROKEN_SOURCE: 'em2'}),
+                         BY_DEV, PF, OWN)
+broken_text = sr.render(broken, TEMPLATE)
+check('a rule\'s comment line with an application or a source written in config.xml by hand across lines: on one line, no '
+      'rule of its own begun', (len(broken), [line for line in broken_text.splitlines()
+                                              if ('sid:1;' in line or 'sid:2;' in line) and not line.startswith('#')],
+                                broken_text.count('# rule 1: block SSH drop ip')),
+      (1, [], 1))
 check('a line as Suricata reads one', lines[0],
       r'drop tls [198.51.100.128/25,!198.51.100.129] any -> ' + DEST + r' any (msg:"Application Control: block YouTube - '
       r'guests"; flow:to_server; tls.sni; content:"googlevideo.com"; nocase; endswith; pcre:"/(?:^|\.)googlevideo\.com$/i"; '

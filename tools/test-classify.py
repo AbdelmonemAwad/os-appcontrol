@@ -1911,6 +1911,17 @@ with tempfile.TemporaryDirectory() as tmp:
            (4, '4', True, 'block', 'TLS', ['Teachers'], True, ''), (5, '5', False, 'pass', 'DNS', ['lan'], False, ''),
            (6, '6', False, 'block', 'DNS', [], False, '')])
     check('settings: no rules in config.xml - none', tables.settings(os.path.join(tmp, 'none.xml'))['rules'], [])
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify/></general><rules>'
+                     '<rule uuid="e1"><enabled/><action>block</action><source>lan</source><app>YouTube</app></rule>'
+                     '<rule uuid="e2"><enabled>1</enabled><action/><source>lan</source><app>YouTube</app></rule>'
+                     '<rule uuid="e3"><action>block</action><source>lan</source><app>YouTube</app></rule>'
+                     '</rules></AppControl></OPNsense></opnsense>')
+    empty = tables.settings(config)
+    check('settings: an element there and empty read as the PHP of the rules hook reads it - <classify/> off, <enabled/> off, '
+          '<action/> no action - while one missing takes its default: no rule cut or dropped that pf does not block',
+          (empty['classify'], [(r['uuid'], r['enabled'], r['action']) for r in empty['rules']]),
+          (False, [('e1', False, 'block'), ('e2', False, ''), ('e3', True, 'block')]))
 cat3 = {'categories': {'5': 'Web'}, 'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TikTok': 'SocialNetwork',
                                                     'TLS': 'Web', 'DNS': 'Network'}}
 check('wanted: a table for the application of each rule switched on - Block or Alert - none for one switched off',

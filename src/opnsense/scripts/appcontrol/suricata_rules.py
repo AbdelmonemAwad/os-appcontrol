@@ -250,6 +250,11 @@ MSG_DROPPED = re.compile(r'["\\;]')
 MSG_SPACE = re.compile(r'[\x00-\x1f\x7f\s]+')
 
 
+def one_line(text):
+    """text on one line: a line break or another control character a space."""
+    return MSG_SPACE.sub(' ', text).strip()
+
+
 def message(rule):
     """msg: the plugin's, what the rule does, its application, its description - what Suricata takes in a
     message: quotes, backslashes and semicolons left out, a line break or another control character a space."""
@@ -305,9 +310,11 @@ def build(conf, catalogue, devices, by_dev, pf, own=()):
             continue
         first = SID_BASE + rule['number'] * SID_SPAN + 1
         said['lines'], said['sids'] = len(lines), [first, first + len(lines) - 1]
-        out.append({'number': rule['number'], 'uuid': rule['uuid'], 'action': rule['action'], 'app': rule['app'],
+        # the comment line of the rule says its application and source as config.xml has them, on one line: a line
+        # break written there by hand would begin a line of its own, a rule for Suricata
+        out.append({'number': rule['number'], 'uuid': rule['uuid'], 'action': rule['action'], 'app': one_line(rule['app']),
                     'verb': 'drop' if rule['action'] == 'block' else 'alert', 'source': where, 'destination': dest,
-                    'source_text': ('not ' if rule['not'] else '') + ','.join(rule['source']), 'msg': message(rule),
+                    'source_text': one_line(('not ' if rule['not'] else '') + ','.join(rule['source'])), 'msg': message(rule),
                     'lines': [{'proto': proto, 'match': match, 'sid': first + i} for i, (proto, match) in enumerate(lines)]})
     return out, report
 

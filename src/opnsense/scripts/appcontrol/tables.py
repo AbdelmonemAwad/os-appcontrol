@@ -103,11 +103,11 @@ def settings(path=CONFIG):
     general = root.find('OPNsense/AppControl/general')
     if general is None:
         return out
-    out['classify'] = (general.findtext('classify') or '1').strip() == '1'
+    out['classify'] = flag(general, 'classify', '1')
     out['interfaces'] = [i for i in (general.findtext('interfaces') or '').split(',') if i.strip()]
     out['apps'] = [a for a in (general.findtext('apps') or '').split(',') if a.strip()]
     out['blocked'] = [a for a in (general.findtext('blocked') or '').split(',') if a.strip()]
-    out['block_log'] = (general.findtext('block_log') or '0').strip() == '1'
+    out['block_log'] = flag(general, 'block_log', '0')
     try:
         out['ttl'] = max(60, int((general.findtext('ttl') or TTL)))
     except ValueError:
@@ -115,21 +115,29 @@ def settings(path=CONFIG):
     return out
 
 
+def flag(node, tag, default):
+    """A switch of config.xml as plugins.inc.d/appcontrol.inc reads it in PHP: the element missing, its default; there
+    and empty, off - PHP's config array gives '' for it."""
+    text = node.findtext(tag)
+    return (default if text is None else text).strip() == '1'
+
+
 def rules(node):
     """The rules of the Rules tab, in their order in config.xml: [{'number' (from 1, its place there), 'uuid',
     'enabled', 'action' (block or alert), 'app', 'source' ([element] as OPNsense's NetworkAliasField keeps
     them), 'not' (the source inverted), 'description'}]. A rule with no application, no source or an action
-    of another kind is kept, switched off: its place and its number stay its own."""
+    of another kind is kept, switched off: its place and its number stay its own. An element there and empty
+    is read as appcontrol_rules() reads it in PHP: <enabled/> off, <action/> no action, so switched off."""
     out = []
     for number, rule in enumerate(node.findall('rule') if node is not None else [], 1):
-        action = (rule.findtext('action') or 'block').strip()
+        action = rule.findtext('action')
+        action = ('block' if action is None else action).strip()
         app = (rule.findtext('app') or '').strip()
         source = [s.strip() for s in (rule.findtext('source') or '').split(',') if s.strip()]
         out.append({'number': number, 'uuid': (rule.get('uuid') or '').strip(),
-                    'enabled': (rule.findtext('enabled') or '1').strip() == '1' and action in ACTIONS and bool(app)
-                    and bool(source),
+                    'enabled': flag(rule, 'enabled', '1') and action in ACTIONS and bool(app) and bool(source),
                     'action': action, 'app': app, 'source': source,
-                    'not': (rule.findtext('source_not') or '0').strip() == '1',
+                    'not': flag(rule, 'source_not', '0'),
                     'description': (rule.findtext('description') or '').strip()})
     return out
 
