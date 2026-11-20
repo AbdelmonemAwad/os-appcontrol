@@ -7,7 +7,9 @@
 its table when the firewall's own resolver vouches for them, and what was dropped in hardware for one no
 longer blocked handed back.
 
-    cut.py cut <file>   cut the connections the JSON file lists, print a JSON summary (classify.py)
+    cut.py cut <file> [<policy>]
+                        cut the connections the JSON file lists, print a JSON summary (classify.py, which gives
+                        what is blocked for whom as it holds it, in the policy file)
     cut.py release      hand back from hardware what was dropped for an application no longer blocked,
                         print a JSON summary (the page's Apply, and the plugin's removal)
 
@@ -32,10 +34,16 @@ the name it carried - the server name of TLS or QUIC, HTTP's Host - and:
   a packet on to look like it, and a clock that steps changes neither. Not by address: another
   application on the same server is not cut (settled point 5, option a).
 
-A connection whose application is no longer blocked when the run begins is left, and counted: one cut for
-every device (Blocked applications) when that application is blocked so no more, one cut for a block rule
-of the Rules tab when that rule is gone, switched off or no longer a block of that application
-(tables.policy()). Each cut is counted for its rule. The kills stop once the run has had BUDGET seconds,
+A connection no longer blocked for its device when the run begins is left, and counted: what is blocked, for
+whom, is the classifier's - tables.policy() as the last Apply put it in force, which classify.py writes for
+this run (the policy file; config.xml as saved only without one, where a rule changed and not applied would
+stop the cut and not the pf block) - and each rule's source is resolved again here, as pf holds it now
+(tables.Where): one cut for every device (Blocked applications) is left when that application is blocked so
+no more; one cut for a block rule of the Rules tab when no rule of its application blocks it any more for its
+device - the rule gone, switched off, no longer a block of it, or its source no longer holding the device's
+address - and cut for another rule when that one holds it now. The policy file is read again before the
+states are listed: a change the service read meanwhile (Apply) is judged by. Each cut is counted for its rule.
+The kills stop once the run has had BUDGET seconds,
 before classify.py's own limit: the connections not reached are given back in the summary (left), and
 classify.py queues them again. The states are looked up by their ends (to_cut()), so a run of 5,000
 connections against 100,000 states is one pass over each.
@@ -86,6 +94,7 @@ DROPPED = STATE + '/dropped.json'
 LOCK = STATE + '/cut.lock'
 PFCTL = tables.PFCTL
 CONFIG = tables.CONFIG
+IFCONFIG = '/sbin/ifconfig'
 HWDROP = '/usr/local/opnsense/scripts/xgs/hwdrop.py'    # os-xgs-npu's, where it is installed
 WAIT = 40               # seconds one waits for DROPPED while another holds it: past a release's hardware step
 SLACK = 5               # seconds between a connection's first packet and its state's making, either way
@@ -323,15 +332,53 @@ def connection(item):
         return None
 
 
-def blocked_still(conn, found):
-    """Whether a connection is still to be cut for what it was queued for, by policy() as it is now: for every
-    device when its rule is '' - its application in Blocked applications - else its block rule there still."""
+def still_for(conn, found, where):
+    """What a connection is still to be cut for, by policy() as it is now (found) and the sources as they hold now
+    (where, a tables.Where): '' while its application is blocked for every device; a rule's uuid while a block rule
+    of its application holds its device - the rule it was queued for first; None when nothing blocks it for its
+    device any more."""
     entry = found.get(conn.app)
     if entry is None:
-        return False
-    if not conn.rule:
-        return entry['everyone']
-    return any(rule['uuid'] == conn.rule for rule in entry['rules'])
+        return None
+    if entry['everyone']:
+        return ''
+    rules = sorted(entry['rules'], key=lambda rule: rule['uuid'] != conn.rule)
+    for rule in rules:
+        if where is not None and where.holds(rule, conn.client[0]):
+            return rule['uuid']
+    return None
+
+
+def blocked_still(conn, found, where=None):
+    """Whether a connection is still to be cut, by policy() as it is now (still_for())."""
+    return still_for(conn, found, where) is not None
+
+
+def load_policy(path):
+    """What is blocked for whom as the classifier holds it - {application: {'table', 'everyone', 'rules': [{'uuid',
+    'number', 'source', 'not'}]}}, tables.policy()'s - from the file it wrote; None when there is none to read."""
+    data = load(path, None) if path else None
+    policy = data.get('policy') if isinstance(data, dict) else None
+    if not isinstance(policy, dict):
+        return None
+    for entry in policy.values():
+        if not isinstance(entry, dict) or not isinstance(entry.get('table'), str) or \
+                not isinstance(entry.get('everyone'), bool) or not isinstance(entry.get('rules'), list):
+            return None
+        for rule in entry['rules']:
+            if not isinstance(rule, dict) or not isinstance(rule.get('uuid'), str) or not isinstance(rule.get('not'), bool) \
+                    or not isinstance(rule.get('source'), list) or not all(isinstance(e, str) for e in rule['source']):
+                return None
+    return policy
+
+
+def sources(found, config, pf):
+    """The sources of the block rules of `found` resolved now (tables.Where) - none to resolve, None."""
+    if not any(entry['rules'] for entry in found.values()):
+        return None
+    where = tables.Where()
+    where.refresh(found, tables.interface_devices(config) or {}, tables.device_networks(tables.ifconfig(IFCONFIG)), pf)
+    return where
 
 
 def to_cut(conns, all_states, now):
@@ -487,14 +534,26 @@ def kill(sid, summary):
     return True
 
 
-def cut(conns, now=None, ask=None, config=None):
+def judge(read, found, config, pf):
+    """The connections of `read` still to be cut by `found`, each with the rule it is cut for now (still_for())."""
+    where = sources(found, config, pf)
+    out = []
+    for item, conn in read:
+        rule = still_for(conn, found, where)
+        if rule is not None:
+            out.append((item, conn._replace(rule=rule)))
+    return out
+
+
+def cut(conns, now=None, ask=None, config=None, policy=None):
     """The connections cut, the coprocessor dropping them first where os-xgs-npu is installed, and the
     servers the resolver vouches for put in their applications' tables first of all. The summary:
     connections asked for, cut (a state of theirs killed), states killed, dropped in hardware (a count,
     UNKNOWN or None) and the hardware (hardware()), servers put in their tables (tabled), connections whose
-    server was not (alone), connections left as their application is no longer blocked (unblocked), those
-    the budget did not reach (left, as they were given), per application, errors. now is the monotonic
-    clock's as pf's states are listed, and ask looks a name up (lookup()) - the tests give their own."""
+    server was not (alone), connections left as nothing blocks them for their device any more (unblocked),
+    those the budget did not reach (left, as they were given), per application and per rule, errors. now is
+    the monotonic clock's as pf's states are listed, and ask looks a name up (lookup()) - the tests give their
+    own; policy is the classifier's file of what is blocked for whom (load_policy())."""
     started = time.monotonic()
     config = config or CONFIG
     summary = {'connections': len(conns), 'cut': 0, 'states': 0, 'dropped': None, 'hardware': None, 'tabled': 0,
@@ -504,17 +563,22 @@ def cut(conns, now=None, ask=None, config=None):
         summary['errors'].append('%d connection(s) to cut could not be read' % (len(conns) - len(read)))
     if not read:
         return summary
-    conf = tables.settings(config)
-    if not conf['read']:
-        summary['errors'].append('%s could not be read: nothing cut' % config)
-        return summary
-    found = tables.policy(conf, tables.present(config))
-    still = {app: entry['table'] for app, entry in found.items()}
-    kept = [(item, conn) for item, conn in read if blocked_still(conn, found)]
+    found = load_policy(policy)
+    if found is None:
+        if policy:
+            summary['errors'].append('%s could not be read: what is blocked taken from %s' % (policy, config))
+        conf = tables.settings(config)
+        if not conf['read']:
+            summary['errors'].append('%s could not be read: nothing cut' % config)
+            return summary
+        found = tables.policy(conf, tables.present(config))
+    pf = tables.Pf(pfctl=PFCTL)
+    kept = judge(read, found, config, pf)
     summary['unblocked'] = len(read) - len(kept)
     read = kept
     if not read:
         return summary
+    still = {app: entry['table'] for app, entry in found.items()}
 
     # the servers the resolver vouches for go into their tables before any state is killed, so that the
     # rule holds what the devices send after the cut
@@ -524,12 +588,20 @@ def cut(conns, now=None, ask=None, config=None):
     for _, conn in read:
         if not conn.alone and conn.server[0] in answers.get(name_of(conn.host), ()):
             puts.setdefault(still[conn.app], set()).add(conn.server[0])
-    pf = tables.Pf(pfctl=PFCTL)
     for table in sorted(puts):
         pf.update(table, puts[table])
     summary['errors'].extend(pf.errors)
     summary['tabled'] = sum(len(servers) for servers in puts.values())
     summary['alone'] = sum(1 for _, conn in read if conn.server[0] not in puts.get(still[conn.app], ()))
+
+    # what is blocked read again: a change the service read meanwhile - Apply - is judged by before the kills
+    again = load_policy(policy)
+    if again is not None and again != found:
+        kept = judge(read, again, config, pf)
+        summary['unblocked'] += len(read) - len(kept)
+        read = kept
+        if not read:
+            return summary
 
     try:
         done = subprocess.run([PFCTL, '-ss', '-vv'], capture_output=True, text=True, errors='replace', timeout=120)
@@ -666,7 +738,7 @@ def main(argv):
             if not isinstance(found, list):
                 print(json.dumps({'errors': ['%s: no list of connections could be read' % argv[2]]}))
                 return 0
-            print(json.dumps(cut(found)))
+            print(json.dumps(cut(found, policy=argv[3] if len(argv) > 3 else None)))
         else:
             print(json.dumps(release()))
     except Exception as error:                                           # noqa: BLE001

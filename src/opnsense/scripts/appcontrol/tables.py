@@ -469,6 +469,49 @@ class Held:
         return False
 
 
+class Where:
+    """Where the sources of the block rules are, for telling whether a device is one of them: each element of a
+    source resolved (resolve()) - an interface's networks as ifconfig -a lists them, an alias's table as
+    pf holds it, an address or a network as written - all again at each window's close (refresh()), and an
+    element new to the rules at once (ensure()). An element that cannot be read holds no device: nothing is
+    cut for it, and the rule's pf block still stands."""
+
+    def __init__(self):
+        self.held = {}          # element -> 'any', a tables.Held, or None when it could not be read
+        self.unread = {}        # element -> why
+        self.devices = {}
+        self.by_dev = {}
+
+    def refresh(self, policy, devices, by_dev, pf):
+        self.held, self.unread, self.devices, self.by_dev = {}, {}, devices, by_dev
+        self.ensure(policy, pf)
+
+    def ensure(self, policy, pf):
+        for found in policy.values():
+            for rule in found['rules']:
+                for element in rule['source']:
+                    if element in self.held:
+                        continue
+                    kind, value = resolve(element, self.devices, self.by_dev, pf)
+                    if kind == 'any':
+                        self.held[element] = 'any'
+                    elif kind == 'nets':
+                        self.held[element] = Held(value)
+                    else:
+                        self.held[element] = None
+                        self.unread[element] = value
+
+    def holds(self, rule, address):
+        """Whether a device's address is one of a rule's source: in one of its elements, or - inverted - in
+        none, every one of them read."""
+        found = [self.held.get(element) for element in rule['source']]
+        if rule['not']:
+            if not found or any(h is None for h in found):
+                return False
+            return not any(isinstance(h, str) or address in h for h in found)
+        return any(isinstance(h, str) or (h is not None and address in h) for h in found)
+
+
 def table_for_category(category, aliases):
     """The table of a category, when its alias is there."""
     name = alias_name(CATEGORY_PREFIX, category)

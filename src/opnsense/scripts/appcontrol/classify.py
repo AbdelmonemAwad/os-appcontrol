@@ -139,6 +139,7 @@ RETRY_MOST = 600.0          # it stops again, up to this
 BEHIND = 2                  # windows past their close with none being judged that mean the clock stepped
                             # forward: a window judged past TIMEOUT leaves at most two behind
 CUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cut.py')
+POLICY = 'policy.json'      # in the work directory: what is blocked, for whom, as the service holds it, for cut.py
 CUT_TIMEOUT = 120           # seconds a cut may take - cut.py ends its kills at its own BUDGET, 90 s, before it
 CUT_MOST = 5000             # connections one cut takes; the rest wait for the next
 CUT_WAITING = 20000         # connections waiting for a cut at most; past it the oldest are left uncut, and said
@@ -256,47 +257,8 @@ def internet(server):
     return address.is_global or any(address in net for net in ALSO_GLOBAL if net.version == address.version)
 
 
-class Where:
-    """Where the sources of the block rules are, for telling whether a device is one of them: each element of a
-    source resolved (tables.resolve()) - an interface's networks as ifconfig -a lists them, an alias's table as
-    pf holds it, an address or a network as written - all again at each window's close (refresh()), and an
-    element new to the rules at once (ensure()). An element that cannot be read holds no device: nothing is
-    cut for it, and the rule's pf block still stands."""
-
-    def __init__(self):
-        self.held = {}          # element -> 'any', a tables.Held, or None when it could not be read
-        self.unread = {}        # element -> why
-        self.devices = {}
-        self.by_dev = {}
-
-    def refresh(self, policy, devices, by_dev, pf):
-        self.held, self.unread, self.devices, self.by_dev = {}, {}, devices, by_dev
-        self.ensure(policy, pf)
-
-    def ensure(self, policy, pf):
-        for found in policy.values():
-            for rule in found['rules']:
-                for element in rule['source']:
-                    if element in self.held:
-                        continue
-                    kind, value = tables.resolve(element, self.devices, self.by_dev, pf)
-                    if kind == 'any':
-                        self.held[element] = 'any'
-                    elif kind == 'nets':
-                        self.held[element] = tables.Held(value)
-                    else:
-                        self.held[element] = None
-                        self.unread[element] = value
-
-    def holds(self, rule, address):
-        """Whether a device's address is one of a rule's source: in one of its elements, or - inverted - in
-        none, every one of them read."""
-        found = [self.held.get(element) for element in rule['source']]
-        if rule['not']:
-            if not found or any(h is None for h in found):
-                return False
-            return not any(isinstance(h, str) or address in h for h in found)
-        return any(isinstance(h, str) or (h is not None and address in h) for h in found)
+# Where the sources of the block rules are: tables.py's, which cut.py judges a connection's device by too
+Where = tables.Where
 
 
 def in_memory(path, mount=MOUNT):
@@ -991,7 +953,13 @@ class Cutter:
     not waited for, one run at a time; its answer, read when it ends, counted in the state. The list goes
     to it as a file in the work directory, in memory, removed once the run is over. A run past CUT_TIMEOUT
     is stopped and its connections queued again, as are those cut.py says it did not reach before its own
-    budget ran out: each connection is given CUT_TRIES runs (requeue())."""
+    budget ran out: each connection is given CUT_TRIES runs (requeue()).
+
+    What is blocked, for whom, goes to it as the service holds it - tables.policy() as the last Apply put it in
+    force, read at the start and at each SIGHUP - in a file of the run's (POLICY), written again at a SIGHUP while
+    the run goes (keep_policy()): cut.py judges each connection by it, not by config.xml as saved, where a rule
+    changed and not applied would stop the cut and not the pf block; and a run under way sees a SIGHUP's change
+    before its kills."""
 
     def __init__(self, work, script=CUT):
         self.work, self.script = work, script
@@ -1000,6 +968,18 @@ class Cutter:
         self.started = 0.0
         self.runs = 0
         self.paths = ()
+        self.policy_path = os.path.join(work, POLICY)
+
+    def keep_policy(self, state, now=None):
+        """The policy the service acts on now, written for the run going, if one goes."""
+        if self.proc is not None:
+            self._policy(state, now)
+
+    def _policy(self, state, now):
+        try:
+            write_json(self.policy_path, {'policy': state.policy})
+        except OSError as error:
+            state.fail('what is blocked could not be written for cut.py: %s' % error, now)
 
     def start(self, state, now):
         if self.proc is not None or not state.to_cut:
@@ -1007,12 +987,13 @@ class Cutter:
         batch, state.to_cut = state.to_cut[:CUT_MOST], state.to_cut[CUT_MOST:]
         self.runs += 1
         base = os.path.join(self.work, 'cut-%d' % self.runs)
-        self.paths = (base + '.json', base + '.out')
+        self.paths = (base + '.json', base + '.out', self.policy_path)
+        self._policy(state, now)
         try:
             write_json(self.paths[0], batch)
             with open(self.paths[1], 'w') as out:
-                self.proc = subprocess.Popen([self.script, 'cut', self.paths[0]], stdin=subprocess.DEVNULL,
-                                             stdout=out, stderr=subprocess.DEVNULL)
+                self.proc = subprocess.Popen([self.script, 'cut', self.paths[0], self.policy_path],
+                                             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.DEVNULL)
         except OSError as error:
             self.proc = None
             self._remove()
@@ -1342,6 +1323,8 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             for problem in pf.errors:
                 state.fail(problem)
             pf.errors = []
+            # a cut under way judges its connections by what is in force now, before its kills
+            cutter.keep_policy(state, now())
             cutter.start(state, now())
             save(captures)
         live = [c for c in captures if c.proc is not None and c.read_in_window < PACKETS_PER_WINDOW]

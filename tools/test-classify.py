@@ -1643,6 +1643,26 @@ with tempfile.TemporaryDirectory() as tmp:
         check('cut.py past its time: stopped, said, its file removed, its connections queued again for a second run',
               (time.time() - began < 10, said[-1], cutter.proc, os.listdir(work), [c.get('tries') for c in state.to_cut]),
               (True, 'cut.py took longer than 1 s: 1 connection(s) of a blocked application queued again', None, [], [2]))
+        # what is blocked for whom, given to the run as the service holds it, and written again at a SIGHUP meanwhile
+        kept_to_cut = state.to_cut
+        state.to_cut = [dict(one_cut)]
+        state.policy = {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': True, 'rules': []}}
+        cutter.start(state, T0)
+        given = json.load(open(cutter.policy_path))
+        state.policy = {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': False,
+                                    'rules': [{'uuid': 'u1', 'number': 1, 'source': ['opt2'], 'not': False}]}}
+        cutter.keep_policy(state, T0)
+        again = json.load(open(cutter.policy_path))
+        cutter.proc.kill()
+        cutter.proc.wait()
+        cutter.poll(state, T0)
+        check('a run: given what is blocked as the service holds it, beside its connections; written again as a SIGHUP '
+              'changes it while the run goes - cut.py reads it again before its kills; gone with the run',
+              (sorted(given['policy']), again['policy']['YouTube']['rules'][0]['source'], os.path.exists(cutter.policy_path)),
+              (['YouTube'], ['opt2'], False))
+        cutter.keep_policy(state, T0)
+        check('no run going: nothing written for one', os.listdir(work), [])
+        state.to_cut = kept_to_cut
         run_cutter(cutter, state)
         classify.CUT_TIMEOUT = kept_timeout
         check('past its time again, on their second run: left uncut, said', (state.to_cut, said[-1]),
@@ -1661,13 +1681,14 @@ with tempfile.TemporaryDirectory() as tmp:
 # ------------------------------------------------------------- the service: a blocked application's connection cut
 CUT_STAND_IN = ('#!/usr/bin/env python3\nimport json, sys\nconns = json.load(open(sys.argv[2]))\n'
                 'open(%r, "a").write(json.dumps(conns) + "\\n")\napps = {}\n'
+                'open(%r + ".policy", "a").write(open(sys.argv[3]).read() + "\\n" if len(sys.argv) > 3 else "{}\\n")\n'
                 'for c in conns:\n    apps[c["app"]] = apps.get(c["app"], 0) + 1\n'
                 'print(json.dumps({"connections": len(conns), "cut": len(conns), "states": 2 * len(conns), "dropped": None, '
                 '"apps": apps, "errors": []}))\n')
 
 with tempfile.TemporaryDirectory() as tmp:
     cuts_file = os.path.join(tmp, 'cuts')
-    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % cuts_file)
+    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % (cuts_file, cuts_file))
     state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, cut=os.path.join(tmp, 'cut.py'),
                                               change=lambda text: text.replace('<apps>YouTube</apps>',
                                                                                '<apps></apps><blocked>YouTube</blocked>'))
@@ -1682,6 +1703,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check('the service: what cut.py said, in status.json - the totals, YouTube\'s, the applications blocked',
           ({k: saved['totals'][k] for k in ('to_cut', 'cut', 'cut_states')}, saved['apps']['YouTube'].get('cut'), saved['blocking']),
           ({'to_cut': 1, 'cut': 1, 'cut_states': 2}, 1, ['YouTube']))
+    given = [json.loads(line) for line in open(cuts_file + '.policy')] if os.path.exists(cuts_file + '.policy') else []
+    check('the service: cut.py given what is blocked for whom as the service holds it - the last Apply\'s - not config.xml '
+          'as saved since', given, [{'policy': {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': True, 'rules': []}}}])
 
 # ------------------------------------------------------- the service keeps the Suricata rules of the Rules tab current
 SURICATA_STAND_IN = ('#!/usr/bin/env python3\nimport json, sys\nopen(%r, "a").write(sys.argv[1] + "\\n")\n'
@@ -1717,7 +1741,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # ------------------------------------------------------- the settings read again (SIGHUP): an application blocked since
 with tempfile.TemporaryDirectory() as tmp:
     cuts_file = os.path.join(tmp, 'cuts')
-    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % cuts_file)
+    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % (cuts_file, cuts_file))
     real_apply = classify.apply
     seen = {}
 

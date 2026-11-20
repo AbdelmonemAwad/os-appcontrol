@@ -19,7 +19,11 @@ killed by its id, the coprocessor asked first, once, with each state's ends apar
 in the summary, with the connections cut per application; a server put in its application's table before any
 state is killed only when the resolver gives that address for the name its connection carried - not a forged
 name, an address written as a name, no name, a name the resolver does not answer in time, nor a server shared
-with an application not blocked; a connection of an application no longer blocked left; the kills stopped at
+with an application not blocked; a connection of an application no longer blocked left - judged by what is blocked
+for whom as the classifier holds it (its policy file), not by config.xml as saved, its rule's source resolved again:
+a rule switched off and not applied still cuts, one not applied does not, a device its source no longer holds is
+left, another rule of its application holding it cuts it, and a change of the policy while the run goes is judged
+by before the kills; the kills stopped at
 the run's budget and the connections not reached given back; without hwdrop.py pf alone; one too old - no
 release_addresses() - or not loading asked nothing; a hardware step that fails or passes its deadline says
 "unknown" and the pf cut goes on at once; the module search path left as it was; what was dropped written down
@@ -340,21 +344,76 @@ with tempfile.TemporaryDirectory() as tmp:
           (summary['unblocked'], summary['apps'], kills(calls(log)), summary['tabled']),
           (4, {'YouTube': 1}, ['pfctl -k id -k 00000000000000a1', 'pfctl -k id -k 00000000000000a2'], 1))
 
-    # a block rule of the Rules tab: TikTok blocked from the LAN alone, YouTube for every device
+    # a block rule of the Rules tab: TikTok blocked from the LAN alone, YouTube for every device; the LAN's networks as
+    # ifconfig -a gives them
     RULE = 'bbbbbbbb-0000-4000-8000-000000000001'
-    log = setup(tmp, hwdrop=None)
-    with open(cut.CONFIG, 'w') as handle:
-        handle.write(CONFIG.replace('</AppControl>', '<rules><rule uuid="%s"><enabled>1</enabled><action>block</action>'
-                                                     '<source>lan</source><source_not>0</source_not><app>TikTok</app>'
-                                                     '</rule></rules></AppControl>' % RULE)
-                     % (aliases('YouTube', 'TikTok'), '1', 'YouTube'))
-    ruled = [dict(CONNS[0]), dict(CONNS[1]), dict(CONNS[3], rule=RULE), dict(CONNS[4], rule='gone')]
+    RULED_CONFIG = ('<opnsense><interfaces><lan><if>em1</if></lan></interfaces>' + CONFIG[len('<opnsense>'):]).replace(
+        '</AppControl>', '<rules><rule uuid="%s"><enabled>ENABLED</enabled><action>block</action><source>lan</source>'
+                         '<source_not>0</source_not><app>TikTok</app></rule></rules></AppControl>' % RULE)
+    LAN_IFCONFIG = ('em1: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500\n'
+                    '\tinet 192.0.2.1 netmask 0xffffff00 broadcast 192.0.2.255\n\tinet6 2001:db8::1 prefixlen 64\n')
+
+    def ruled_setup(enabled='1', lan=LAN_IFCONFIG):
+        log = setup(tmp, hwdrop=None)
+        with open(cut.CONFIG, 'w') as handle:
+            handle.write((RULED_CONFIG % (aliases('YouTube', 'TikTok'), '1', 'YouTube')).replace('ENABLED', enabled))
+        with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
+            handle.write(lan)
+        program(os.path.join(tmp, 'ifconfig'), '#!/bin/sh\ncat %s\n' % os.path.join(tmp, 'ifconfig.txt'))
+        cut.IFCONFIG = os.path.join(tmp, 'ifconfig')
+        return log
+
+    outsider = dict(CONNS[1], client=['203.0.113.77', 50003], rule=RULE)
+    log = ruled_setup()
+    ruled = [dict(CONNS[0]), dict(CONNS[3], rule=RULE), dict(CONNS[4], rule='gone'), outsider]
     summary = cut.cut(ruled, NOW, ask=ask)
-    check('a connection queued for a block rule of the Rules tab: cut while that rule blocks its application, counted for it; '
-          'one queued for every device whose application only a rule blocks, and one whose rule is gone, left',
-          (summary['cut'], summary['unblocked'], summary['rules'], summary['apps']),
-          (2, 2, {'': 1, RULE: 1}, {'YouTube': 1, 'TikTok': 1}))
-    check('the block rule\'s connection read with its rule', cut.connection(ruled[2]).rule, RULE)
+    check('a connection queued for a block rule of the Rules tab: cut while a rule of its application holds its device - the '
+          'rule it was queued for, or another when that one is gone - counted for it; one whose device the source no '
+          'longer holds, left', (summary['cut'], summary['unblocked'], summary['rules'], summary['apps']),
+          (3, 1, {'': 1, RULE: 2}, {'YouTube': 1, 'TikTok': 2}))
+    check('the block rule\'s connection read with its rule', cut.connection(ruled[1]).rule, RULE)
+
+    # what is blocked for whom as the classifier holds it - the last Apply's - not config.xml as saved since
+    policy_file = os.path.join(tmp, 'policy.json')
+
+    def policy(*rules, everyone=('YouTube',)):
+        found = {app: {'table': 'appcontrol_%s' % app, 'everyone': True, 'rules': []} for app in everyone}
+        if rules:
+            found['TikTok'] = {'table': 'appcontrol_TikTok', 'everyone': False,
+                               'rules': [{'uuid': RULE, 'number': 1, 'source': list(r), 'not': False} for r in rules]}
+        with open(policy_file, 'w') as handle:
+            json.dump({'policy': found}, handle)
+        return policy_file
+
+    log = ruled_setup(enabled='0')
+    summary = cut.cut([dict(CONNS[3], rule=RULE)], NOW, ask=ask, policy=policy(['lan']))
+    check('the rule switched off in config.xml and not applied: cut all the same, as pf still blocks - by what the classifier '
+          'holds', (summary['cut'], summary['unblocked'], summary['rules']), (1, 0, {RULE: 1}))
+    log = ruled_setup(enabled='1')
+    summary = cut.cut([dict(CONNS[3], rule=RULE)], NOW, ask=ask, policy=policy())
+    check('a rule in config.xml the classifier does not hold - not applied: nothing cut for it', (summary['cut'],
+                                                                                                 summary['unblocked']), (0, 1))
+    log = ruled_setup(lan=LAN_IFCONFIG.replace('2001:db8::1 prefixlen 64', '2001:db8:7::1 prefixlen 64'))
+    summary = cut.cut([dict(CONNS[3], rule=RULE)], NOW, ask=ask, policy=policy(['lan']))
+    check('the LAN\'s prefix changed since the connection was queued: its device no longer in the source - left',
+          (summary['cut'], summary['unblocked']), (0, 1))
+    log = ruled_setup()
+
+    def ask_then_apply(name):
+        """The run under way when Apply narrows the rule to the guests: the classifier's policy written again."""
+        policy(['opt2'])
+        return ask(name)
+
+    summary = cut.cut([dict(CONNS[3], rule=RULE)], NOW, ask=ask_then_apply, policy=policy(['lan']))
+    check('a run under way when Apply changes the rule\'s source: judged again before the kills - its device no longer in '
+          'it, left, no state killed', (summary['cut'], summary['unblocked'], kills(calls(log))), (0, 1, []))
+    log = ruled_setup()
+    with open(policy_file, 'w') as handle:
+        handle.write('{"policy": {"TikTok": {"table": 1}}}')
+    summary = cut.cut([dict(CONNS[3], rule=RULE)], NOW, ask=ask, policy=policy_file)
+    check('the classifier\'s policy not to be read: what is blocked taken from config.xml, said',
+          (summary['cut'], summary['errors']), (1, ['%s could not be read: what is blocked taken from %s'
+                                                    % (policy_file, cut.CONFIG)]))
 
     log = setup(tmp)
     EVENTS.result = 3
@@ -563,7 +622,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check('the lock let go: runs again', 'errors' in answer and answer['errors'] == [], True)
     raised = threading.Event()
 
-    def broken(conns, now=None, ask=None, config=None):
+    def broken(conns, now=None, ask=None, config=None, policy=None):
         raised.set()
         raise ValueError('a fault of its own')
 
