@@ -15,7 +15,10 @@
  * the setting says; none for an application not chosen, one chosen whose alias is not made yet, an
  * alias switched off, a category's alias, an owner's alias of the same name, or an alias of another
  * kind; none at all with classifying off, nothing chosen, or no settings; and the start at boot left
- * as it was.
+ * as it was. And a block rule of the Rules tab: the same two rules from its source alone - an interface's
+ * network, an alias inverted, several at once - described with the source as the pages name it, after those
+ * of Blocked applications; none for an Alert rule, one switched off, one of an application whose table is
+ * not made, one of another action or with no source; one rule read as config.xml gives one, without a list.
  *
  *   php tools/test-rules.php
  */
@@ -161,6 +164,66 @@ namespace {
     check(rules(null, $aliases) === [], 'no settings of the plugin\'s at all: no rule');
     check(count(rules(['blocked' => 'YouTube'], $aliases)) === 2, 'classify not in config.xml - on by default: the rules');
     check(rules(['classify' => '1', 'blocked' => ' , ,'], $aliases) === [], 'a list of commas and spaces: no rule');
+
+    /* the rules of the Rules tab */
+    function rule($uuid, $app, $source, $more = [])
+    {
+        return $more + ['@attributes' => ['uuid' => $uuid], 'enabled' => '1', 'action' => 'block', 'source' => $source,
+            'source_not' => '0', 'app' => $app, 'description' => ''];
+    }
+
+    function with_rules($general, $rules, $aliases)
+    {
+        global $config;
+        $config = ['interfaces' => ['lan' => ['if' => 'em1', 'descr' => 'LAN'], 'opt2' => ['if' => 'em2', 'descr' => 'GUEST'],
+            'opt3' => ['if' => 'em3']], 'OPNsense' => ['AppControl' => ['general' => $general, 'rules' => ['rule' => $rules]]]];
+        \OPNsense\Firewall\Alias::$given = $aliases;
+        $fw = new \OPNsense\Firewall\Plugin();
+        appcontrol_firewall($fw);
+        return array_map(function ($r) {
+            return [$r[0], $r[2]];
+        }, $fw->ordered());
+    }
+
+    $grid = [
+        rule('r1', 'YouTube', 'opt2'),
+        rule('r2', 'TikTok', 'Teachers', ['source_not' => '1']),
+        rule('r3', 'YouTube', 'lan,opt3,192.0.2.0/24'),
+        rule('r4', 'TikTok', 'any', ['action' => 'alert']),
+        rule('r5', 'TikTok', 'lan', ['enabled' => '0']),
+        rule('r6', 'Zoom', 'lan'),
+        rule('r7', 'TikTok', 'lan', ['action' => 'pass']),
+        rule('r8', 'TikTok', ''),
+    ];
+    $got = with_rules(['classify' => '1', 'blocked' => 'IoT-Scada', 'block_log' => '1'], $grid, $aliases);
+    $made = array_map(function ($r) {
+        return [$r[1]['descr'], $r[1]['from'] ?? null, $r[1]['from_not'] ?? null, $r[1]['to'], $r[1]['ipprotocol']];
+    }, $got);
+    check($made === [
+        ['Application Control: block IoT-Scada', null, null, '<appcontrol_IoT_Scada>', 'inet'],
+        ['Application Control: block IoT-Scada', null, null, '<appcontrol_IoT_Scada>', 'inet6'],
+        ['Application Control: block YouTube from GUEST net', 'opt2', false, '<appcontrol_YouTube>', 'inet'],
+        ['Application Control: block YouTube from GUEST net', 'opt2', false, '<appcontrol_YouTube>', 'inet6'],
+        ['Application Control: block TikTok from not Teachers', 'Teachers', true, '<appcontrol_TikTok>', 'inet'],
+        ['Application Control: block TikTok from not Teachers', 'Teachers', true, '<appcontrol_TikTok>', 'inet6'],
+        ['Application Control: block YouTube from LAN net, OPT3 net, 192.0.2.0/24', 'lan,opt3,192.0.2.0/24', false,
+            '<appcontrol_YouTube>', 'inet'],
+        ['Application Control: block YouTube from LAN net, OPT3 net, 192.0.2.0/24', 'lan,opt3,192.0.2.0/24', false,
+            '<appcontrol_YouTube>', 'inet6'],
+    ], 'a block rule of the Rules tab: two rules from its source alone - an interface\'s network, an alias inverted, several ' .
+        'at once - described with the source as the pages name it, after those of Blocked applications; none for an Alert ' .
+        'rule, one switched off, Zoom (no table yet), one of another action and one with no source');
+    $first = $got[2][1];
+    check($got[2][0] === 1 && $first['type'] === 'block' && $first['direction'] === 'in' && $first['quick'] === true &&
+        $first['log'] === true && !isset($first['interface']),
+        'the rule of a source: priority 1, block, inbound, quick, on no interface, logged as Log what is blocked says');
+    $one = with_rules(['classify' => '1'], rule('r1', 'YouTube', 'opt2'), $aliases);
+    check(count($one) === 2 && $one[0][1]['from'] === 'opt2', 'one rule as config.xml gives it, not in a list: read');
+    check(with_rules(['classify' => '0'], $grid, $aliases) === [], 'classifying off: no rule of the Rules tab either');
+    check(with_rules(['classify' => '1'], [rule('r1', 'YouTube', 'opt2')], [alias('appcontrol_YouTube',
+        'Application Control: YouTube', ['enabled' => '0'])]) === [], 'its application\'s alias switched off: no rule');
+    $GLOBALS['config'] = ['OPNsense' => ['AppControl' => ['general' => ['classify' => '1'], 'rules' => '']]];
+    check(appcontrol_rules() === [], 'no rule in config.xml - an empty element: none read');
 
     /* the start at boot: still only when classifying is on */
     $GLOBALS['configd'] = [];
