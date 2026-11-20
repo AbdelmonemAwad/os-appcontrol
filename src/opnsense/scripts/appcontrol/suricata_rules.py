@@ -29,10 +29,17 @@ classifying is on, gives:
 - one line for its protocol, when the application is a protocol Suricata reads by itself (PROTOCOLS,
   app-layer-protocol) with its parser on in OPNsense's suricata.yaml;
 - drop for Block, which Suricata does in IPS mode and alerts in IDS mode, and alert for Alert;
-- its source as Suricata writes addresses: any, or the networks the source holds now - an interface's from
-  ifconfig -a, an alias's as pf holds its table, an address or a network as written (tables.resolve()) -
-  inverted with ! as the rule says. Suricata sees a device's own address before NAT only: on an internal
-  interface it reads.
+- its source as Suricata writes addresses: the networks the source holds now - an interface's from ifconfig -a,
+  an alias's as pf holds its table, an address or a network as written (tables.resolve()) - inverted with ! as
+  the rule says, and never the firewall itself: its own addresses are taken out of every source - any is every
+  address but the firewall's, an inverted source leaves them out with its own, and one inside a source's network
+  is an exception in its group ([network, !address], Suricata's own way of writing it). Suricata sees a device's
+  own address before NAT only: on an internal interface it reads;
+- its destination the internet alone, as the cut has it (classify.py's internet() and Network): every address but
+  the firewall's own, those of the networks it is connected to - ifconfig -a's, every interface's - and those that
+  are not the internet's (tables.NOT_INTERNET). In IPS mode, where Suricata sits before the host and before pf, a
+  line so never drops a device's connection to the firewall - its web GUI, ssh, its resolver, DHCP - nor to a host
+  of its own networks, a private one, a site over a VPN; nor, on the WAN, the firewall's own connections.
 
 A rule gives no line when Suricata cannot tell its application - nDPI knows no name for it and it is no protocol
 Suricata reads - when its source cannot be read or holds no address now, when a line would pass Suricata's own
@@ -46,6 +53,7 @@ gives a line. What was written is kept in /var/db/os-appcontrol/suricata.json fo
 caller.
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -64,7 +72,7 @@ SID_BASE = 3990000000
 SID_SPAN = 10000
 MOST_RULES = 999
 LONGEST = 8000          # characters a line at most: Suricata takes 8,192 a rule
-SOURCE_LONGEST = 7400   # characters of a source at most, the rest of a line's options left room
+SOURCE_LONGEST = 7400   # characters of a source and a destination at most, the rest of a line's options left room
 THRESHOLD = 'threshold:type limit,track by_src,count 1,seconds 60;'
 # where a device writes a name: Suricata's protocol, its keyword for the name, and whether nocase is taken
 # there - http.host is lower case already, and Suricata refuses a rule with nocase on it
@@ -101,9 +109,27 @@ def address(network):
     return str(network.network_address) if network.prefixlen == network.max_prefixlen else network.with_prefixlen
 
 
-def source(rule, devices, by_dev, pf):
-    """(Suricata's addresses for a rule's source, None) - any, or [networks] with a ! when inverted - or (None,
-    why, the element): 'unread' for an element that cannot be read, 'empty' for a source that holds no address."""
+def own_networks(own):
+    """The firewall's own addresses as networks of one address, IPv4 first."""
+    return tables.flatten([(ipaddress.ip_network(a), False) for a in own])
+
+
+def destination(own, connected):
+    """Suricata's addresses for every line's destination: the internet alone - every address but the firewall's own,
+    those of the networks it is connected to and those that are not the internet's (tables.NOT_INTERNET)."""
+    nets = [(n, False) for n in list(tables.NOT_INTERNET) + list(connected)] + [(n, False) for n in own_networks(own)]
+    return '![%s]' % ','.join(address(n) for n in tables.flatten(nets))
+
+
+def negated(excepted):
+    """Suricata's addresses for every address but `excepted` (networks, collapsed)."""
+    return '![%s]' % ','.join(address(n) for n in excepted)
+
+
+def source(rule, devices, by_dev, pf, own=()):
+    """(Suricata's addresses for a rule's source, None, '') - its networks less the firewall's own addresses, every
+    address but those when inverted - or (None, why, the element): 'unread' for an element that cannot be read,
+    'empty' for a source that holds no address of a device. `own`: the firewall's own addresses."""
     entries, anything = [], False
     for element in rule['source']:
         kind, value = tables.resolve(element, devices, by_dev, pf)
@@ -113,13 +139,21 @@ def source(rule, devices, by_dev, pf):
             anything = True
         else:
             entries.extend(value)
-    nets = tables.flatten(entries)
+    nets, mine = tables.flatten(entries), own_networks(own)
+    if rule['not']:
+        # every device but those, and never the firewall itself: its addresses left out with them
+        if anything:
+            return None, 'empty', ''
+        excepted = tables.flatten([(n, False) for n in nets + mine])
+        return (negated(excepted) if excepted else 'any'), None, ''
     if anything:
-        return (None, 'empty', '') if rule['not'] else ('any', None, '')
-    if not nets:
-        return ('any', None, '') if rule['not'] else (None, 'empty', '')
-    group = '[%s]' % ','.join(address(n) for n in nets)
-    return ('!' + group if rule['not'] else group), None, ''
+        return ('![%s]' % ','.join(address(n) for n in mine) if mine else 'any'), None, ''
+    # a network the firewall's own addresses fill is no device's; one holding one of them takes it as an exception
+    kept = [n for n in nets if not any(n.version == o.version and n.subnet_of(o) for o in mine)]
+    if not kept:
+        return None, 'empty', ''
+    inside = [o for o in mine if any(o.version == n.version and o.subnet_of(n) for n in kept)]
+    return '[%s]' % ','.join([address(n) for n in kept] + ['!' + address(o) for o in inside]), None, ''
 
 
 MSG_DROPPED = re.compile(r'["\\;]')
@@ -135,11 +169,13 @@ def message(rule):
     return MSG_SPACE.sub(' ', MSG_DROPPED.sub('', text)).strip()[:200]
 
 
-def build(conf, catalogue, devices, by_dev, pf):
-    """(the template's rules, {uuid: what each rule gave}): for each rule its number, verb, source, message and
-    lines - each line Suricata's protocol, its matching options and its sid - or why it gives none."""
+def build(conf, catalogue, devices, by_dev, pf, own=()):
+    """(the template's rules, {uuid: what each rule gave}): for each rule its number, verb, source, destination,
+    message and lines - each line Suricata's protocol, its matching options and its sid - or why it gives none.
+    `own`: the firewall's own addresses, out of every source and every destination with the networks of by_dev."""
     hosts = catalogue.get('hosts') or {}
     out, report = [], {}
+    dest = destination(own, [n for nets in by_dev.values() for n in nets])
     for rule in conf['rules']:
         said = {'number': rule['number'], 'lines': 0, 'names': 0, 'protocol': None, 'reason': None, 'sids': None}
         report[rule['uuid'] or str(rule['number'])] = said
@@ -165,17 +201,17 @@ def build(conf, catalogue, devices, by_dev, pf):
         if len(lines) >= SID_SPAN:
             said['reason'] = 'too_many'
             continue
-        where, why, element = source(rule, devices, by_dev, pf)
+        where, why, element = source(rule, devices, by_dev, pf, own)
         if where is None:
             said['reason'], said['element'] = why, element
             continue
-        if len(where) > SOURCE_LONGEST:
+        if len(where) + len(dest) > SOURCE_LONGEST:
             said['reason'] = 'too_long'
             continue
         first = SID_BASE + rule['number'] * SID_SPAN + 1
         said['lines'], said['sids'] = len(lines), [first, first + len(lines) - 1]
         out.append({'number': rule['number'], 'uuid': rule['uuid'], 'action': rule['action'], 'app': rule['app'],
-                    'verb': 'drop' if rule['action'] == 'block' else 'alert', 'source': where,
+                    'verb': 'drop' if rule['action'] == 'block' else 'alert', 'source': where, 'destination': dest,
                     'source_text': ('not ' if rule['not'] else '') + ','.join(rule['source']), 'msg': message(rule),
                     'lines': [{'proto': proto, 'match': match, 'sid': first + i} for i, (proto, match) in enumerate(lines)]})
     return out, report
@@ -248,8 +284,15 @@ def write(config=None, catalogue_path=None, path=None, template=None, state=None
     if conf['classify'] and any(rule['enabled'] for rule in conf['rules']):
         catalogue = tables.load_catalogue(catalogue_path or tables.CATALOGUE)
         devices = tables.interface_devices(config)
-        by_dev = tables.device_networks(tables.ifconfig(ifconfig or IFCONFIG))
-        rules, summary['rules'] = build(conf, catalogue, devices, by_dev, pf or tables.Pf())
+        listed = tables.ifconfig(ifconfig or IFCONFIG)
+        own = tables.addresses(listed)
+        if not own:
+            # with no address of its own known, no line could leave the firewall out of its source and destination
+            summary.update({'status': 'failed', 'errors': ['the firewall\'s own addresses could not be read (%s -a): '
+                                                           'the Suricata rules left as they were' % (ifconfig or IFCONFIG)]})
+            return summary
+        rules, summary['rules'] = build(conf, catalogue, devices, tables.device_networks(listed), pf or tables.Pf(),
+                                        own)
     else:
         summary['rules'] = {rule['uuid'] or str(rule['number']): {'number': rule['number'], 'lines': 0, 'reason': 'disabled'}
                             for rule in conf['rules']}

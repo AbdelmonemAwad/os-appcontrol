@@ -10,8 +10,9 @@
  # interfaces - is no setting of config.xml's. The script writes each line's matching options (one name in
  # one place a device writes it, or the application's protocol) and its sid; the shape of a line is here.
  #
- #   rules       [{number, action, app, verb (drop or alert), source (Suricata's addresses), source_text,
- #                 msg, lines: [{proto, match, sid}]}]
+ #   rules       [{number, action, app, verb (drop or alert), source and destination (Suricata's addresses:
+ #                 never the firewall itself, the destination the internet alone), source_text, msg,
+ #                 lines: [{proto, match, sid}]}]
  #   threshold   one alert a device a minute for each line; a drop still drops every packet it matches
  #}
 # Application Control (os-appcontrol): the rules of its Rules tab, written by its page's Apply.
@@ -19,6 +20,6 @@
 {% for rule in rules %}
 # rule {{ rule.number }}: {{ rule.action }} {{ rule.app }} from {{ rule.source_text }}
 {% for line in rule.lines %}
-{{ rule.verb }} {{ line.proto }} {{ rule.source }} any -> any any (msg:"{{ rule.msg }}"; flow:to_server; {{ line.match }} {{ threshold }} sid:{{ line.sid }}; rev:1;)
+{{ rule.verb }} {{ line.proto }} {{ rule.source }} any -> {{ rule.destination }} any (msg:"{{ rule.msg }}"; flow:to_server; {{ line.match }} {{ threshold }} sid:{{ line.sid }}; rev:1;)
 {% endfor %}
 {% endfor %}

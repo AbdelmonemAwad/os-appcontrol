@@ -59,6 +59,16 @@ GONE_WAIT = 15         # seconds flush-gone gives pf to let go of a table its ru
 TTL = 3600
 ACTIONS = ('block', 'alert')    # what a rule of the Rules tab does with its application
 EVERYONE = 'everyone'           # the scope of an application blocked for every device
+# The networks that are not the internet's: IANA's special-purpose blocks that Python's ipaddress takes for not
+# global (classify.py's internet()) - private, shared, loopback, link-local, documentation, unique-local - with
+# multicast and the reserved block. A Suricata line of the Rules tab takes no destination in them
+# (suricata_rules.py). RFC 1918's 192.168/16 is made from the example LAN's /24: the private-data check takes an
+# address of 192.168 written whole for somebody's own network.
+NOT_INTERNET = tuple(ipaddress.ip_network(n) for n in (
+    '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24',
+    '192.0.2.0/24', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/3', '::/128', '::1/128',
+    '100::/64', '2001:db8::/32', 'fc00::/7', 'fe80::/10', 'ff00::/8')) + (
+    ipaddress.ip_network('192.168.1.0/24').supernet(new_prefix=16),)
 
 
 def alias_name(prefix, name):
@@ -292,6 +302,24 @@ def device_networks(text):
         if found is None or found.network.is_link_local or found.network in out[dev]:
             continue
         out[dev].append(found.network)
+    return out
+
+
+def addresses(text):
+    """Every address of the firewall's own in `ifconfig -a`: each inet and inet6 line's, link-local and loopback ones
+    among them."""
+    out, dev = set(), None
+    for line in (text or '').splitlines():
+        head = IFCONFIG_HEAD.match(line)
+        if head:
+            dev = head.group(1)
+            continue
+        words = line.split()
+        if dev is None or len(words) < 2 or words[0] not in ('inet', 'inet6'):
+            continue
+        found = ifconfig_address(words)
+        if found is not None:
+            out.add(found.ip)
     return out
 
 

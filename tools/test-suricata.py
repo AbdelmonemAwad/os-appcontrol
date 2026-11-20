@@ -14,7 +14,11 @@ pcre the boundary nDPI asks for, nocase but on http.host, which Suricata refuses
 against host names, the same as nDPI's own rule (ac_domain_match_handler(), written again here) for a name, a name
 with a last dot, a last hyphen, a first hyphen, both; a name of other characters refused; a source as Suricata
 writes addresses - any, an interface's networks, an address, an alias's table with an entry written with ! taken
-out, inverted - and why one cannot be written: not read, holding no address, too long; the message, what Suricata
+out, inverted - and why one cannot be written: not read, holding no address, too long; the firewall's own addresses
+taken out of every source - any, inverted, a network holding one as an exception, one written alone no device's -
+and every line's destination the internet alone, none of the firewall's addresses, its networks or the blocks that
+are not the internet's, as Suricata reads an address group; its addresses not to be read, the file left as it was;
+the message, what Suricata
 takes in one; each rule's lines - its protocol when Suricata reads it, its names, drop for Block and alert for
 Alert, the sids its number gives - or why none: switched off, nothing Suricata can tell, past 999 rules; the
 template rendered - one comment line for each rule, then its lines, each well formed, under Suricata's limit, its
@@ -192,6 +196,62 @@ check('a source for Suricata: any; an interface\'s networks, link-local left out
        ('[198.51.100.7,198.51.100.128/25]', None, ''), ('[192.0.2.0/26,192.0.2.70]', None, ''),
        ('![192.0.2.40/31]', None, ''), (None, 'unread', 'Gone'), (None, 'empty', ''), ('any', None, ''),
        (None, 'empty', ''), (None, 'empty', ''), (None, 'unread', '(self)')])
+OWN = tables.addresses(IFCONFIG_TEXT)
+check('the firewall\'s own addresses in ifconfig -a: every inet and inet6 line\'s, link-local among them',
+      sorted(str(a) for a in OWN), ['192.0.2.1', '198.51.100.129', '2001:db8:1::1', 'fe80::11'])
+
+
+def group(text):
+    """What a source or a destination as these lines write it holds, as Suricata reads an address group: any; [a,b,!c] -
+    in a or b, not in c; ![a,b] - every address but those of a and b. A function of an address."""
+    if text == 'any':
+        return lambda a: True
+    negated = text.startswith('![')
+    items = text[2:-1].split(',') if negated else text[1:-1].split(',')
+    plus = [tables.ipaddress.ip_network(i) for i in items if not i.startswith('!')]
+    minus = [tables.ipaddress.ip_network(i[1:]) for i in items if i.startswith('!')]
+
+    def holds(address):
+        a = tables.ipaddress.ip_address(address)
+        inside = any(a.version == n.version and a in n for n in plus)
+        return not inside if negated else inside and not any(a.version == n.version and a in n for n in minus)
+    return holds
+
+
+own_cases = [(['any'], False), (['lan'], False), (['opt2'], False), (['Teachers'], True), (['opt3'], True),
+             (['192.0.2.1'], False), (['198.51.100.128/31'], False), (['Wing'], False)]
+check('a source for Suricata, the firewall\'s own addresses taken out: any - every address but them; an interface\'s network '
+      '- each of them inside it an exception of its group; inverted - left out with the excepted ones; an interface with no '
+      'address inverted - every address but them; one of them written alone - no device\'s; a network of two, one of them '
+      'the firewall\'s - that one its exception; an alias holding one of them - the same',
+      [sr.source(rule(source=s, **{'not': n}), DEVICES, BY_DEV, PF, OWN)[:2] for s, n in own_cases],
+      [('![192.0.2.1,198.51.100.129,2001:db8:1::1,fe80::11]', None),
+       ('[192.0.2.0/24,2001:db8:1::/64,!192.0.2.1,!2001:db8:1::1]', None), ('[198.51.100.128/25,!198.51.100.129]', None),
+       ('![192.0.2.1,192.0.2.40/31,198.51.100.129,2001:db8:1::1,fe80::11]', None),
+       ('![192.0.2.1,198.51.100.129,2001:db8:1::1,fe80::11]', None), (None, 'empty'),
+       ('[198.51.100.128/31,!198.51.100.129]', None), ('[192.0.2.0/26,192.0.2.70,!192.0.2.1]', None)])
+check('no source holds an address of the firewall\'s own, as Suricata reads it; each still holds the devices it names',
+      ([s for s, n in own_cases for a in OWN if (lambda w: w is not None and group(w)(a))(
+          sr.source(rule(source=s, **{'not': n}), DEVICES, BY_DEV, PF, OWN)[0])],
+       [group(sr.source(rule(source=s, **{'not': n}), DEVICES, BY_DEV, PF, OWN)[0])(a) for s, n, a in (
+           (['any'], False, '203.0.113.9'), (['lan'], False, '192.0.2.10'), (['lan'], False, '2001:db8:1::10'),
+           (['opt2'], False, '198.51.100.130'), (['Teachers'], True, '192.0.2.10'), (['Teachers'], True, '192.0.2.40'))]),
+      ([], [True, True, True, True, True, False]))
+DEST = sr.destination(OWN, [n for nets in BY_DEV.values() for n in nets])
+check('the destination: the internet alone - every address but the firewall\'s own, its networks, the private, shared, '
+      'loopback, link-local, documentation and unique-local ones, multicast and the reserved block',
+      [group(DEST)(a) for a in ('192.0.2.1', '2001:db8:1::1', '198.51.100.129', '192.0.2.10', '198.51.100.130', '10.0.0.5',
+                                '172.16.0.5', '192.168.1.7', '100.64.0.5', '127.0.0.1', '169.254.0.5', '224.0.0.251',
+                                '255.255.255.255', '0.0.0.0', '203.0.113.9', '::1', 'fe80::1', 'fc00::5', 'fd00::5', 'ff02::1',
+                                '2001:db8:9::1')], [False] * 21)
+real_not_internet = tables.NOT_INTERNET
+tables.NOT_INTERNET = ()
+try:
+    bare = sr.destination(OWN, [n for nets in BY_DEV.values() for n in nets])
+finally:
+    tables.NOT_INTERNET = real_not_internet
+check('the destination without the registry\'s blocks: exactly the firewall\'s own addresses and its connected networks, '
+      'every interface\'s', bare, '![192.0.2.0/24,198.51.100.128/25,2001:db8:1::/64,fe80::11]')
 check('the message: what the rule does, its application, its description - quotes, backslashes and semicolons left out, '
       'a line break a space, letters beyond ASCII kept, at most 200 characters',
       [sr.message(rule(description=d)) for d in ('', 'guests "evening"; a\\b\nnext\tday', 'Zürich office', 'x' * 300)],
@@ -212,7 +272,7 @@ RULES = [rule(number=1, uuid=U[1], app='YouTube', source=['opt2'], description='
          rule(number=5, uuid=U[5], app='YouTube', source=['Gone']),
          rule(number=6, uuid=U[6], app='TLS', source=['Teachers'], **{'not': True}),
          rule(number=1000, uuid=U[7], app='YouTube')]
-built, report = sr.build({'rules': RULES}, CATALOGUE, DEVICES, BY_DEV, PF)
+built, report = sr.build({'rules': RULES}, CATALOGUE, DEVICES, BY_DEV, PF, OWN)
 check('each rule: YouTube from the guests - its 9 names, 4 places each; SSH - its protocol; one switched off; one whose '
       'application Suricata cannot tell; one whose source is not read; TLS from all but Teachers - its protocol; one past '
       'the 999th', {k[-1]: (v['lines'], v['names'], v['protocol'], v['reason']) for k, v in report.items()},
@@ -220,9 +280,12 @@ check('each rule: YouTube from the guests - its 9 names, 4 places each; SSH - it
        '5': (0, 9, None, 'unread'), '6': (1, 0, 'tls', None), '7': (0, 0, None, 'too_many')})
 check('a source not read: which element', report[U[5]].get('element'), 'Gone')
 youtube = built[0]
-check('Block: drop, from the guests\' network; Alert: alert; the source said in each rule\'s comment',
+check('Block: drop, from the guests\' network but the firewall\'s address there; Alert: alert, from every address but '
+      'the firewall\'s; the source said in each rule\'s comment',
       [(r['verb'], r['source'], r['source_text']) for r in built],
-      [('drop', '[198.51.100.128/25]', 'opt2'), ('alert', 'any', 'any'), ('drop', '![192.0.2.40/31]', 'not Teachers')])
+      [('drop', '[198.51.100.128/25,!198.51.100.129]', 'opt2'), ('alert', '![192.0.2.1,198.51.100.129,2001:db8:1::1,fe80::11]',
+                                                                  'any'),
+       ('drop', '![192.0.2.1,192.0.2.40/31,198.51.100.129,2001:db8:1::1,fe80::11]', 'not Teachers')])
 check('the sids: SID_BASE, the rule\'s number times SID_SPAN, then one a line - under OPNsense\'s own user rules, which '
       'count down from 4294967294', ([l['sid'] for l in youtube['lines']][:3], report[U[1]]['sids'],
                                      report[U[6]]['sids'], sr.SID_BASE + sr.MOST_RULES * sr.SID_SPAN + sr.SID_SPAN < 4294967294 - 10000),
@@ -244,19 +307,27 @@ check('rendered: a comment line for each rule, then its lines - 38 - and nothing
       (comments, len(lines), '' in text.rstrip('\n').splitlines()),
       (['# rule 1: block YouTube from opt2', '# rule 2: alert SSH from any', '# rule 6: block TLS from not Teachers'], 38, False))
 check('a line as Suricata reads one', lines[0],
-      r'drop tls [198.51.100.128/25] any -> any any (msg:"Application Control: block YouTube - guests"; flow:to_server; '
-      r'tls.sni; content:"googlevideo.com"; nocase; endswith; pcre:"/(?:^|\.)googlevideo\.com$/i"; '
+      r'drop tls [198.51.100.128/25,!198.51.100.129] any -> ' + DEST + r' any (msg:"Application Control: block YouTube - '
+      r'guests"; flow:to_server; tls.sni; content:"googlevideo.com"; nocase; endswith; pcre:"/(?:^|\.)googlevideo\.com$/i"; '
       r'threshold:type limit,track by_src,count 1,seconds 60; sid:3990010001; rev:1;)')
-RULE_LINE = re.compile(r'^(drop|alert) (tls|quic|http|dns|ip) (any|!?\[[0-9a-f.:/,]+\]) any -> any any \((.*)\)$')
+RULE_LINE = re.compile(r'^(drop|alert) (tls|quic|http|dns|ip) (any|!?\[[0-9a-f.:/,!]+\]) any -> (!\[[0-9a-f.:/,]+\]) any '
+                       r'\((.*)\)$')
+check('every line: its destination the internet alone - none of the firewall\'s addresses, its networks, a private, '
+      'multicast or link-local one - and its source no address of the firewall\'s',
+      [line for line in lines for a in sorted(str(o) for o in OWN) + ['192.0.2.10', '198.51.100.130', '2001:db8:1::10',
+                                                                      '192.168.1.7', '10.0.0.5', '224.0.0.251', 'fe80::1']
+       if group(RULE_LINE.match(line).group(4))(a) or (a in {str(o) for o in OWN} and group(RULE_LINE.match(line).group(3))(a))],
+      [])
 well = []
 for line in lines:
     found = RULE_LINE.match(line)
-    options = found.group(4) if found else ''
+    options = found.group(5) if found else ''
     parts = [p.strip() for p in options.split('; ') if p.strip()]
     well.append(bool(found) and options.endswith('rev:1;') and options.count('"') % 2 == 0 and
                 parts[0].startswith('msg:"') and 'flow:to_server' in parts and any(p.startswith('sid:') for p in parts))
 sids = [int(re.search(r'sid:(\d+);', line).group(1)) for line in lines]
-check('every line well formed - action, protocol, source, its options closed, msg first, flow, sid, rev - its sid its own, '
+check('every line well formed - action, protocol, source, destination, its options closed, msg first, flow, sid, rev - its '
+      'sid its own, '
       'under Suricata\'s 8,192 characters', (all(well), len(set(sids)) == len(sids), max(len(line) for line in lines) < 8192),
       (True, True, True))
 
@@ -296,8 +367,9 @@ with tempfile.TemporaryDirectory() as tmp:
           ('ok', True, 37, True, 37, [U[1], U[2]]))
     check('written: what the template renders - its first line of the rules', [line for line in open(rules_file).read().splitlines()
                                                                                if line.startswith('alert')][0],
-          'alert ip any any -> any any (msg:"Application Control: alert SSH"; flow:to_server; app-layer-protocol:ssh; '
-          'threshold:type limit,track by_src,count 1,seconds 60; sid:3990020001; rev:1;)')
+          'alert ip ![192.0.2.1,198.51.100.129,2001:db8:1::1,fe80::11] any -> ' + DEST + ' any (msg:"Application Control: '
+          'alert SSH"; flow:to_server; app-layer-protocol:ssh; threshold:type limit,track by_src,count 1,seconds 60; '
+          'sid:3990020001; rev:1;)')
     before = os.stat(rules_file).st_mtime_ns
     summary = write()
     check('nothing changed: not written again, not changed - no reload asked for', (summary['changed'],
@@ -317,6 +389,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check('the template not to be read: failed, said, the file left as it was',
           (summary['status'], summary['changed'], os.path.isfile(rules_file), summary['errors'][0].startswith(
               'the template could not be rendered, the Suricata rules left as they were')), ('failed', False, True, True))
+    program(os.path.join(tmp, 'no-ifconfig'), '#!/bin/sh\nexit 1\n')
+    with open(config, 'w') as handle:
+        handle.write(CONFIG % ('1', two.replace('guests', 'guests, later')))
+    summary = sr.write(config, catalogue, rules_file, TEMPLATE, state, os.path.join(tmp, 'no-ifconfig'), PF)
+    check('the firewall\'s own addresses not to be read: failed, said, the file left as it was - no line could leave the '
+          'firewall out', (summary['status'], summary['changed'], 'guests, later' in open(rules_file).read(), summary['errors']),
+          ('failed', False, False, ['the firewall\'s own addresses could not be read (%s -a): the Suricata rules left as they '
+                                    'were' % os.path.join(tmp, 'no-ifconfig')]))
     summary = write(classify='0', rules_xml=two)
     check('classifying off: the file removed - changed - each rule switched off', (summary['changed'], os.path.exists(rules_file),
                                                                                   summary['lines'], summary['rules'][U[1]]['reason']),
@@ -330,7 +410,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check('a source too long for a Suricata rule: that rule none, said; the others written',
           (summary['rules'][U[1]]['reason'], summary['rules'][U[2]]['lines'], summary['lines']), ('too_long', 1, 1))
     kept = sr.LONGEST
-    sr.LONGEST = 200            # past every line of YouTube's, under SSH's
+    # past every line of YouTube's, under SSH's
+    sr.LONGEST = len([line for line in open(rules_file).read().splitlines() if 'app-layer-protocol:ssh' in line][0])
     try:
         summary = write(rules_xml=two)
     finally:
