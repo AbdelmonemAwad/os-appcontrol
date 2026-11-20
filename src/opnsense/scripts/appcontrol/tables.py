@@ -14,11 +14,18 @@ address seen again is refreshed with pfctl -T zero, which starts its time again 
 FreeBSD 15.1); an address new to the table is added with pfctl -T add.
 
     appcontrol_cat_<category>     one for every category of the installed nDPI
-    appcontrol_<application>      one for each application chosen in Settings
+    appcontrol_<application>      one for each application chosen in Settings, in Application tables
+                                  or in Blocked applications
 
 A name is what OPNsense takes for an alias: letters, digits and _, at most 31 characters. Any other
 character becomes _; a name too long is cut, and given _ and four hex digits of its own SHA-1, so
 two names cut alike never meet. The alias's description carries the name nDPI gives.
+
+An application is blocked once it is chosen in Blocked applications and its table is in config.xml:
+plugins.inc.d/appcontrol.inc gives that table a block rule, and classify.py and cut.py cut its
+connections (blocked()). Chosen and not applied yet - its alias not made - nothing of it is blocked.
+A blocked application's table takes a server only from cut.py, once the firewall's own resolver gives
+that address for the name its connection carried: the rule holds every device's new connections to it.
 
     tables.py wanted       the aliases the settings ask for, as JSON - what aliases.php writes
     tables.py flush-gone   the tables of aliases gone, taken out of pf (Apply, and the plugin's removal)
@@ -29,6 +36,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
 PREFIX = 'appcontrol_'
@@ -39,6 +47,7 @@ PFCTL = '/sbin/pfctl'
 CONFIG = '/conf/config.xml'
 CATALOGUE = '/var/db/os-appcontrol/ndpi.json'
 BATCH = 64
+GONE_WAIT = 15         # seconds flush-gone gives pf to let go of a table its rules still used (Apply's reload)
 TTL = 3600
 
 
@@ -60,8 +69,10 @@ def cut_name(prefix, name):
 
 def settings(path=CONFIG):
     """The plugin's settings out of config.xml: classify (on by default: no element there is on),
-    the interfaces chosen, the applications chosen, the expiry in seconds."""
-    out = {'classify': True, 'interfaces': [], 'apps': [], 'ttl': TTL, 'read': False}
+    the interfaces chosen, the applications chosen for a table, those chosen to be blocked (none by
+    default), whether what is blocked is logged (off by default), the expiry in seconds."""
+    out = {'classify': True, 'interfaces': [], 'apps': [], 'blocked': [], 'block_log': False, 'ttl': TTL,
+           'read': False}
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError):
@@ -73,6 +84,8 @@ def settings(path=CONFIG):
     out['classify'] = (general.findtext('classify') or '1').strip() == '1'
     out['interfaces'] = [i for i in (general.findtext('interfaces') or '').split(',') if i.strip()]
     out['apps'] = [a for a in (general.findtext('apps') or '').split(',') if a.strip()]
+    out['blocked'] = [a for a in (general.findtext('blocked') or '').split(',') if a.strip()]
+    out['block_log'] = (general.findtext('block_log') or '0').strip() == '1'
     try:
         out['ttl'] = max(60, int((general.findtext('ttl') or TTL)))
     except ValueError:
@@ -92,7 +105,8 @@ def load_catalogue(path=CATALOGUE):
 def wanted(conf, catalogue):
     """{alias name: {'kind', 'name', 'description'}} the settings ask for: nothing while classifying is
     off; else a table for every category of the installed nDPI and one for each application chosen
-    that nDPI knows. Names are given in order, categories first, and a name already given makes the
+    that nDPI knows - in Application tables or in Blocked applications, a blocked application's rule
+    being on its table. Names are given in order, categories first, and a name already given makes the
     later one take its suffix."""
     if not conf.get('classify'):
         return {}
@@ -111,9 +125,30 @@ def wanted(conf, catalogue):
         name = categories[cid]
         give(CATEGORY_PREFIX, name, 'category', DESCRIPTION + 'category ' + name)
     known = catalogue.get('protocols') or {}
-    for app in sorted(set(conf.get('apps') or [])):
+    for app in sorted(set(conf.get('apps') or []) | set(conf.get('blocked') or [])):
         if app in known:
             give(PREFIX, app, 'application', DESCRIPTION + app)
+    return out
+
+
+def tabled(conf):
+    """The applications a server is put in a table of its own for: those of Application tables and of
+    Blocked applications."""
+    return set(conf.get('apps') or []) | set(conf.get('blocked') or [])
+
+
+def blocked(conf, aliases):
+    """{application: its table} of the applications blocked: classifying on, chosen in Blocked
+    applications, and its alias in config.xml, switched on (present()) - the rule
+    plugins.inc.d/appcontrol.inc registers is on that table. One chosen whose alias is not there is not
+    blocked yet: the page's Apply makes it."""
+    if not conf.get('classify'):
+        return {}
+    out = {}
+    for app in sorted(set(conf.get('blocked') or [])):
+        table = table_for_app(app, aliases)
+        if table:
+            out[app] = table
     return out
 
 
@@ -158,8 +193,8 @@ def present(path=CONFIG):
 
 
 class Pf:
-    """pfctl, for this plugin's tables: what a table holds, and addresses added or refreshed in it.
-    run(args) -> (exit status, output); a stand-in in the tests."""
+    """pfctl, for this plugin's tables: what a table holds, addresses added or refreshed in it or taken out
+    of it, and a table emptied. run(args) -> (exit status, output); a stand-in in the tests."""
 
     def __init__(self, run=None, pfctl=PFCTL):
         self.pfctl = pfctl
@@ -191,30 +226,54 @@ class Pf:
         new = [a for a in addresses if a not in held]
         again = [a for a in addresses if a in held]
         for verb, group in (('add', new), ('zero', again)):
-            for i in range(0, len(group), BATCH):
-                status, out = self.run(['-t', table, '-T', verb] + group[i:i + BATCH])
-                if status != 0:
-                    self.errors.append('pfctl -t %s -T %s: %s' % (table, verb, out.strip()[:200]))
+            self._each(table, verb, group)
         return len(new), len(again)
 
+    def delete(self, table, addresses):
+        """The addresses taken out of the table; a failure kept in errors, never raised."""
+        self._each(table, 'delete', sorted(set(addresses)))
 
-def flush_gone(pf, path=CONFIG):
+    def flush(self, table):
+        """Every address taken out of the table; a failure kept in errors, never raised."""
+        status, out = self.run(['-t', table, '-T', 'flush'])
+        if status != 0:
+            self.errors.append('pfctl -t %s -T flush: %s' % (table, out.strip()[:200]))
+
+    def _each(self, table, verb, group):
+        for i in range(0, len(group), BATCH):
+            status, out = self.run(['-t', table, '-T', verb] + group[i:i + BATCH])
+            if status != 0:
+                self.errors.append('pfctl -t %s -T %s: %s' % (table, verb, out.strip()[:200]))
+
+
+def flush_gone(pf, path=CONFIG, wait=GONE_WAIT, sleep=time.sleep):
     """[table] taken out: the appcontrol_ tables pf holds whose alias config.xml no longer has, and that no
     rule uses. A table outlives its alias and its rules and goes on holding its addresses (os-blocklists,
     2026-10-29); emptied only, it stays listed in pf until the next boot (99 of them after Apply off and
     after the removal, on the second XGS 3300, 2026-11-17), so it is killed. One a rule still uses, or
-    whose alias is there, is left as it is."""
+    whose alias is there, is left as it is.
+
+    The filter reload that drops the block rules may still be loading them when this looks: on the second
+    XGS 3300 (2026-11-20) appcontrol_YouTube was still a rule's then, at Apply with classifying off and at
+    the removal, and stayed in pf with its address. So while a table whose alias is gone is still a rule's,
+    this reads pf again a second at a time, `wait` seconds at most, before it takes out what no rule uses."""
     try:
         root = ET.parse(path).getroot()
         names = {(a.findtext('name') or '').strip() for a in root.findall('OPNsense/Firewall/Alias/aliases/alias')}
     except (OSError, ET.ParseError):
         return []
-    status, out = pf.run(['-v', '-s', 'Tables'])
-    if status != 0:
-        return []
+    lines = []
+    for tick in range(max(0, int(wait)) + 1):
+        status, out = pf.run(['-v', '-s', 'Tables'])
+        if status != 0:
+            return []
+        lines = [line.split() for line in out.splitlines()]
+        used = [p for p in lines if len(p) >= 2 and p[1].startswith(PREFIX) and p[1] not in names and 'r' in p[0]]
+        if not used or tick == wait:
+            break
+        sleep(1)
     killed = []
-    for line in out.splitlines():
-        parts = line.split()
+    for parts in lines:
         if len(parts) < 2 or not parts[1].startswith(PREFIX) or 'r' in parts[0] or parts[1] in names:
             continue
         status, text = pf.run(['-t', parts[1], '-T', 'kill'])

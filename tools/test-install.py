@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = ['install/install.sh', 'install/uninstall.sh', 'install/enable.sh', 'pkg/post-install.sh',
@@ -46,7 +47,8 @@ WORK = STATE + '/work'
 # rc.subr as far as rc.d/appcontrol asks it
 RC_SUBR = ('load_rc_config() { :; }\nwarn() { echo "${name}: WARNING: $*" >&2; }\n'
            'run_rc_command() {\n\tcase "$1" in\n\t*start) ${start_cmd} ;;\n\t*stop) ${stop_cmd} ;;\n'
-           '\t*status) ${status_cmd} ;;\n\tesac\n}\n')
+           '\t*status) ${status_cmd} ;;\n\t*reload) case " ${extra_commands} " in *" reload "*) ${reload_cmd} ;; esac ;;\n'
+           '\tesac\n}\n')
 CACHES = ['/var/lib/php/tmp/opnsense_menu_cache.xml', '/var/lib/php/tmp/opnsense_acl_cache.json',
           '/tmp/opnsense_menu_cache.xml', '/tmp/opnsense_acl_cache.json']
 COMMIT = '0123456789abcdef0123456789abcdef01234567'
@@ -309,6 +311,41 @@ with tempfile.TemporaryDirectory() as tmp:
           (rc, daemon.poll() is not None, box.called(), open(box.mounts).read(), os.path.exists(run_dir + '/appcontrol.daemon.pid')),
           (0, True, ['umount %s' % work], '', False))
 
+    # reload: the classifier, as its pidfile names it, told to read its settings again (SIGHUP); not running,
+    # started
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onereload')
+    check('rc.d/appcontrol onereload, nothing running: started - the tmpfs mounted, the classifier under daemon(8)',
+          (rc, [c.split()[0] for c in box.called()]), (0, ['mount', 'daemon']))
+    marker = os.path.join(tmp, 'hup')
+    trap = os.path.join(tmp, 'trap.sh')
+    box.write(trap, 'trap "echo hup >> %s" HUP\nwhile :; do sleep 0.1; done\n' % marker, 0o755)
+    # the classifier as ps shows it: its script and "run"
+    classifier = subprocess.Popen([box.fake + '/usr/local/opnsense/scripts/appcontrol/classify.py run', trap],
+                                  executable='/bin/sh')
+    box.write(run_dir + '/appcontrol.pid', str(classifier.pid))
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onereload')
+    deadline = time.time() + 5
+    while not os.path.exists(marker) and time.time() < deadline:
+        time.sleep(0.1)
+    check('rc.d/appcontrol onereload, the classifier running: a SIGHUP to it, nothing started, it goes on running',
+          (rc, out.strip(), os.path.exists(marker), box.called(), classifier.poll()), (0, 'Reloading appcontrol.', True, [], None))
+    # the tmpfs gone from under a running classifier, which waits for it: mounted, then the SIGHUP that has it look again
+    box.write(box.mounts, '')
+    os.remove(marker)
+    box.forget()
+    rc, out = box.sh(box.fake + RC, 'onereload')
+    deadline = time.time() + 5
+    while not os.path.exists(marker) and time.time() < deadline:
+        time.sleep(0.1)
+    check('rc.d/appcontrol onereload, the tmpfs not there: mounted first, then the SIGHUP, nothing started',
+          (rc, box.called(), os.path.exists(marker), classifier.poll()),
+          (0, ['mount -t tmpfs -o size=160m,mode=0750 tmpfs %s' % work], True, None))
+    classifier.kill()
+    classifier.wait()
+    os.remove(run_dir + '/appcontrol.pid')
+
     # uninstall.sh: the classifier and the aliases first, then the files; ndpi left, not installed by it
     os.remove(box.fake + XGS)
     box.write(box.fake + RC, '#!/bin/sh\necho "rc.d appcontrol $* hook=$([ -f %s ] && echo yes || echo no)" >> %s\n'
@@ -322,9 +359,11 @@ with tempfile.TemporaryDirectory() as tmp:
     box.forget()
     rc, out = box.run('install/uninstall.sh')
     calls = box.called()
-    check('uninstall.sh: the classifier stopped and its aliases taken out while the hook is there, first',
-          calls[:4], ['rc.d appcontrol onestop hook=yes', 'pkill -f daemon: [a]ppcontrol\\[',
-                      'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake, 'configctl appcontrol remove hook=yes'])
+    check('uninstall.sh: the classifier stopped and its aliases taken out while the hook is there, first; then, with no '
+          'application blocked, what was dropped in hardware handed back while cut.py is there',
+          calls[:5], ['rc.d appcontrol onestop hook=yes', 'pkill -f daemon: [a]ppcontrol\\[',
+                      'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake, 'configctl appcontrol remove hook=yes',
+                      'configctl appcontrol release hook=yes'])
     check('uninstall.sh: nothing of the plugin left - files, state, pidfiles', box.plugin_files(), [])
     check('uninstall.sh: the window files\' tmpfs taken down, should the rc script not have', box.called('umount'),
           ['umount -f %s' % (box.fake + WORK)])
@@ -391,9 +430,10 @@ with tempfile.TemporaryDirectory() as tmp:
     rc, out = box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': 'true'})
     check('pre-deinstall.sh in an upgrade: nothing done', (rc, box.called()), (0, []))
     rc, out = box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': ''})
-    check('pre-deinstall.sh in a removal: the classifier stopped, its tmpfs taken down, then the aliases taken out', box.called(),
+    check('pre-deinstall.sh in a removal: the classifier stopped, its tmpfs taken down, then the aliases taken out and, with '
+          'no application blocked, what was dropped in hardware handed back - while the hook and cut.py are there', box.called(),
           ['rc.d appcontrol onestop', 'pkill -f daemon: [a]ppcontrol\\[', 'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake,
-           'umount -f %s' % (box.fake + WORK), 'configctl appcontrol remove hook=yes'])
+           'umount -f %s' % (box.fake + WORK), 'configctl appcontrol remove hook=yes', 'configctl appcontrol release hook=yes'])
     os.makedirs(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__', exist_ok=True)
     box.write(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__/classify.cpython-311.pyc', 'x')
     for path in source_files():

@@ -3,8 +3,8 @@
  # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
  #
  # Firewall: Application Control (XGS: Application Control when os-xgs-npu is installed) - which
- # application each connection belongs to, by nDPI, the tables of servers that follow from it, and
- # the connections nDPI did not name.
+ # application each connection belongs to, by nDPI, the tables of servers that follow from it, the
+ # applications blocked, and the connections nDPI did not name.
  #}
 
 <style>
@@ -229,6 +229,34 @@
             $('#ac-project').toggle(!!data.project);
             $('#ac-pf-alone').toggle(!data.project);
             $('#ac-missing').toggle(!data.installed);
+
+            /* what is blocked: the applications, the connections cut, those dropped in hardware first, the
+               packets its rules stopped since pf last loaded them - its counters start again then - and
+               whether os-xgs-npu's Cut in hardware is on, or the os-xgs-npu installed too old for it; shown
+               once something is chosen to be blocked */
+            const blocking = data.blocking || {};
+            const blocked = Array.isArray(blocking.apps) ? blocking.apps : [];
+            const pending = Array.isArray(blocking.pending) ? blocking.pending : [];
+            const hardware = blocking.hardware || null;
+            const usable = !!(hardware && !hardware.too_old);
+            let said = '';
+            if (blocked.length) {
+                said = "{{ lang._('Blocked:') }}" + ' ' + blocked.join(', ') + ' · ' + count(blocking.cut) + ' ' +
+                    "{{ lang._('connections cut') }}";
+                if (usable) {
+                    said += ' · ' + count(blocking.dropped) + ' ' + "{{ lang._('dropped in hardware first') }}";
+                }
+                said += ' · ' + count(blocking.packets) + ' ' + "{{ lang._('packets stopped since the rules were last loaded') }}" + '.';
+            }
+            if (pending.length) {
+                said += (said ? ' ' : '') + "{{ lang._('Chosen to be blocked, not applied yet:') }}" + ' ' +
+                    pending.join(', ') + '.';
+            }
+            $('#ac-blocking').text(plain(said));
+            $('#ac-hw-on').toggle(!!(blocked.length && usable && hardware.cut_in_hardware));
+            $('#ac-hw-off').toggle(!!(blocked.length && usable && !hardware.cut_in_hardware));
+            $('#ac-hw-old').toggle(!!(blocked.length && hardware && hardware.too_old));
+            $('#ac-blocking-line').toggle(said !== '');
             $('#ac-capped').text(plain(count(data.capped_windows) + ' ' +
                 "{{ lang._('windows cut short: connections past the packets, connections or bytes a window reads were not classified') }}"))
                 .toggle(data.capped_windows > 0);
@@ -258,13 +286,25 @@
                         return when(row[column.id]);
                     },
                     table: function (column, row) {
-                        if (!row.chosen) {
+                        if (!row.chosen && !row.blocked && !row.block_pending) {
                             return '<span class="text-muted">-</span>';
                         }
                         if (!row.table) {
                             return '<span class="text-warning">' + "{{ lang._('chosen, not applied yet') }}" + '</span>';
                         }
                         return '<code>' + row.table + '</code> ' + count(row.entries);
+                    },
+                    /* blocked: the connections cut, and the packets its block rule stopped */
+                    blocked: function (column, row) {
+                        if (row.blocked) {
+                            return '<span class="text-danger"><i class="fa fa-ban"></i> ' + "{{ lang._('blocked') }}" +
+                                '</span> · ' + count(row.cut) + ' ' + "{{ lang._('connections cut') }}" + ' · ' +
+                                count(row.packets) + ' ' + "{{ lang._('packets stopped') }}";
+                        }
+                        if (row.block_pending) {
+                            return '<span class="text-warning">' + "{{ lang._('chosen, not applied yet') }}" + '</span>';
+                        }
+                        return '<span class="text-muted">-</span>';
                     }
                 }
             }
@@ -343,7 +383,17 @@
                 ajaxCall('/api/appcontrol/service/reconfigure', {}, function (data) {
                     done();
                     const lines = (data && data.changes ? data.changes : []).concat(data && data.errors ? data.errors : []);
-                    $('#ac-result').attr('class', data && data.status === 'ok' ? 'text-muted' : 'alert alert-danger')
+                    const released = data && data.released ? data.released.released : null;
+                    if (typeof released === 'number' && released > 0) {
+                        lines.push(count(released) + ' ' + "{{ lang._('connections handed back from hardware') }}");
+                    }
+                    /* what the hand-back could not do - kept for the next Apply - said, not left out */
+                    const late = data && data.released && Array.isArray(data.released.errors) ? data.released.errors : [];
+                    $.each(late, function (i, problem) {
+                        lines.push(String(problem));
+                    });
+                    $('#ac-result').attr('class', data && data.status === 'ok' ? (late.length ? 'alert alert-warning' : 'text-muted')
+                        : 'alert alert-danger')
                         .text(plain(lines.length ? lines.join(' · ') : "{{ lang._('Nothing to change in aliases.') }}")).show();
                     refresh();
                     $('#grid-apps').bootgrid('reload');
@@ -367,6 +417,12 @@
     <span id="ac-missing" class="text-warning" style="display: none;">{{ lang._('nDPI is not installed: package ndpi is needed.') }}</span>
     <span id="ac-capped" class="text-warning" style="display: none;"></span>
 </div>
+<div id="ac-blocking-line" class="text-muted" style="padding: 0 0 10px; display: none;">
+    <span id="ac-blocking"></span>
+    <span id="ac-hw-on" style="display: none;">{{ lang._('Cut in hardware is on in XGS: Settings: a connection cut is dropped on the coprocessor first.') }}</span>
+    <span id="ac-hw-off" style="display: none;">{{ lang._('Cut in hardware is off in XGS: Settings: a connection cut leaves hardware once pf has let go of its state.') }}</span>
+    <span id="ac-hw-old" class="text-warning" style="display: none;">{{ lang._('The os-xgs-npu installed is too old for Cut in hardware: a connection is cut by pf alone.') }}</span>
+</div>
 
 <ul class="nav nav-tabs" data-tabs="tabs" id="maintabs">
     <li class="active"><a data-toggle="tab" href="#applications">{{ lang._('Applications') }}</a></li>
@@ -386,6 +442,7 @@
                     <th data-column-id="guessed" data-formatter="number" data-type="numeric" data-width="8em">{{ lang._('Guessed') }}</th>
                     <th data-column-id="last" data-formatter="time" data-type="numeric">{{ lang._('Last seen') }}</th>
                     <th data-column-id="table" data-formatter="table" data-type="string">{{ lang._('Table') }}</th>
+                    <th data-column-id="blocked" data-formatter="blocked" data-type="string" data-sortable="false">{{ lang._('Blocked') }}</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -393,6 +450,7 @@
         </table>
         <div class="text-muted ac-note">
             {{ lang._('Connections: named by nDPI from their packets since the classifier started. Guessed: named by port or address only, never put in a table. Each connection counts once, in the window it began in.') }}
+            {{ lang._('Blocked: chosen in Blocked applications. Connections cut: those nDPI named as the application, their pf states killed. Packets stopped: dropped by its block rules on their way to a server in its table, since the firewall\'s rules were last loaded.') }}
         </div>
         <table id="grid-categories" class="table table-condensed table-hover table-striped table-responsive">
             <thead>
@@ -407,7 +465,7 @@
         </table>
         <div class="text-muted ac-note">
             <span id="ac-tables"></span>.
-            {{ lang._('Each table is an External alias in Firewall: Aliases, for a rule\'s source or destination: servers nDPI named, each kept until unseen for the address expiry. Nothing is blocked by this plugin yet.') }}
+            {{ lang._('Each table is an External alias in Firewall: Aliases, for a rule\'s source or destination: servers nDPI named, each kept until unseen for the address expiry. The table of an application chosen in Blocked applications has a block rule of this plugin\'s as well, and takes a server only when the firewall\'s own resolver gives that address for the name its connection carried.') }}
         </div>
     </div>
     <div id="unknown" class="tab-pane">

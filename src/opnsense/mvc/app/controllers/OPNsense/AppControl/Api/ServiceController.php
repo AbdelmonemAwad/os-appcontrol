@@ -26,7 +26,8 @@ class ServiceController extends ApiControllerBase
 
     /**
      * the Applications tab's grid: each application nDPI named since the classifier started, and each
-     * one chosen in Settings, with its category and its table
+     * one chosen in Settings, with its category and its table; and, for one blocked, the connections cut
+     * and the packets its block rule stopped
      */
     public function searchAppsAction()
     {
@@ -45,6 +46,10 @@ class ServiceController extends ApiControllerBase
                 'table' => (string)($app['table'] ?? ''),
                 'chosen' => !empty($app['chosen']),
                 'entries' => isset($app['entries']) ? (int)$app['entries'] : null,
+                'blocked' => !empty($app['blocked']),
+                'block_pending' => !empty($app['block_pending']),
+                'cut' => (int)($app['cut'] ?? 0),
+                'packets' => isset($app['packets']) ? (int)$app['packets'] : null,
             ];
         }
         return $this->searchRecordsetBase($rows, ['name', 'category', 'protocols', 'table'], 'name');
@@ -98,10 +103,14 @@ class ServiceController extends ApiControllerBase
 
     /**
      * the settings just saved put into the firewall: the aliases made to say what they say (aliases.php,
-     * which reads the installed nDPI again first), the filter reloaded so pf holds their tables, cron so
-     * their Expire runs, the tables of aliases gone taken out of pf, then the classifier started again - or
-     * stopped, when classifying is off. When the aliases could not be written nothing more is done,
-     * except that a classifier turned off is stopped all the same: off means it does not run.
+     * which reads the installed nDPI again first), the filter reloaded so pf holds their tables and the
+     * block rules of the applications blocked, cron so their Expire runs, the tables of aliases gone taken
+     * out of pf; then the classifier has its settings read again - started if it is not running - or is
+     * stopped, when classifying is off; and what was dropped in hardware for an application no longer
+     * blocked is handed back. Read again and not restarted: it keeps what it remembers, so an application
+     * blocked now has the connections it named as it cut at once. When the aliases could not be written
+     * nothing more is done, except that a classifier turned off is stopped all the same: off means it
+     * does not run.
      */
     public function reconfigureAction()
     {
@@ -122,8 +131,9 @@ class ServiceController extends ApiControllerBase
         $backend->configdRun('cron restart');
         $result['gone_tables'] = json_decode((string)$backend->configdRun('appcontrol flush'), true);
         $on = $this->classifying();
-        $backend->configdRun($on ? 'appcontrol restart' : 'appcontrol stop');
+        $backend->configdRun($on ? 'appcontrol reload' : 'appcontrol stop');
         $result['classify'] = $on;
+        $result['released'] = json_decode((string)$backend->configdRun('appcontrol release'), true);
         return $result;
     }
 

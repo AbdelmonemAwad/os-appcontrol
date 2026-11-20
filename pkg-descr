@@ -7,7 +7,15 @@ internal interfaces (tcpdump -p, no port made promiscuous) and stands
 in no connection's way. A connection named only by its port or address
 is shown as a guess and put in no table; those nDPI does not name are
 listed with the server name and the JA4 fingerprint their TLS client
-sent. On by default. Nothing is blocked yet.
+sent. On by default.
+
+An application chosen to be blocked - none by default - gets a block rule
+of the plugin's on its table, which stops a new connection to its servers,
+and each connection nDPI names as it is cut: its pf states killed by its
+two ends and, where os-xgs-npu is installed, dropped on the coprocessor
+first. Its table takes a server only when the firewall's own resolver
+gives that address for the name the connection carried. What was dropped
+there is handed back once the application is no longer blocked.
 
 Plugin Changelog
 ================

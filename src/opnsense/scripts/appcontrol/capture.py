@@ -24,12 +24,17 @@ server name (SNI), the first ALPN and the JA4 fingerprint, as FoxIO's JA4 specif
 What was put together is let go once the connection has its KEEP packets or its window closes. QUIC's
 ClientHello is encrypted and is not read here.
 
+A packet's time is tcpdump's, the wall clock's. Each connection keeps beside it the time of its first
+packet on the monotonic clock as well (began), which pf's age of a state is counted on: a cut compares
+the two, and a clock that steps leaves them as they were.
+
 Nothing here runs a program or touches the firewall: classify.py does that.
 """
 
 import hashlib
 import ipaddress
 import struct
+import time
 
 KEEP = 16                       # packets kept of each connection, both ways together
 MAX_RECORD = 262144             # the largest packet tcpdump writes with -s 0
@@ -218,16 +223,17 @@ def flow_key(proto, a, a_port, b, b_port):
 
 
 class Flow:
-    __slots__ = ('key', 'proto', 'client', 'server', 'started', 'first', 'last', 'packets', 'bytes',
+    __slots__ = ('key', 'proto', 'client', 'server', 'started', 'first', 'began', 'last', 'packets', 'bytes',
                  'window', 'kept', 'keep', 'cut', 'ended', 'iface', 'client_raw', 'syn_seq', 'segments',
                  'hello_done', 'sni', 'alpn', 'ja4')
 
-    def __init__(self, proto, client, server, started, ts, window, iface, client_raw, keep):
+    def __init__(self, proto, client, server, started, ts, window, iface, client_raw, keep, began=None):
         self.proto = proto
         self.client = client                    # (address, port), the address as text
         self.server = server
         self.started = started                  # its beginning was seen here
         self.first = self.last = ts
+        self.began = ts if began is None else began     # its first packet, on the monotonic clock
         self.packets = self.bytes = 0
         self.window = window
         self.kept = 0
@@ -262,6 +268,8 @@ class Flows:
                  [i * seconds, (i + 1) * seconds)
     since        when the capture began: a connection with no SYN whose first packet came in the
                  first SETTLE seconds may be one that was already going, and is not taken as begun
+    offset       the wall clock less the monotonic one, as the reader last saw them (classify.py sets it
+                 at each read): a packet's time less it is its time on the monotonic clock
     """
 
     SETTLE = 2.0
@@ -284,6 +292,7 @@ class Flows:
         self.late = 0                   # packets of a window already closed when they were read
         self.unread = 0                 # packets with no IP header read here
         self.not_followed = 0           # connections begun past a window's limits
+        self.offset = time.time() - time.monotonic()
 
     def window_of(self, ts):
         return int(ts // self.seconds)
@@ -335,7 +344,7 @@ class Flows:
                 started = (proto != TCP and ts - self.since >= self.SETTLE
                            and self.gone.pop(hash(key), None) is None)
             flow = Flow(proto, (address(client[0]), client[1]), (address(server[0]), server[1]), started,
-                        ts, index, self.iface, client, keep)
+                        ts, index, self.iface, client, keep, ts - self.offset)
             self.table[key] = flow
             if keep:
                 win.flows.append(flow)

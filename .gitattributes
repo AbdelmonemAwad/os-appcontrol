@@ -30,8 +30,10 @@ tools/gen-data-strings.py export-ignore
 tools/pcapgen.py export-ignore
 tools/test-aliases.php export-ignore
 tools/test-classify.py export-ignore
+tools/test-cut.py export-ignore
 tools/test-install.py export-ignore
 tools/test-mvc.php export-ignore
+tools/test-rules.php export-ignore
 tools/test-self-update.py export-ignore
 # README.md is left out too, as in os-blocklists since 2026-10-30: nothing on an appliance reads it.
 # LICENSE stays, the terms the code is given under.

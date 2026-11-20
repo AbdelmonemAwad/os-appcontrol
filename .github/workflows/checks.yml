@@ -21,7 +21,8 @@ name: checks
 #
 # And what this plugin adds: the classifier read against ndpiReader's own CSV as the
 # phase 0 lab had it, a guess never put in a table, the aliases written through stand-ins
-# of OPNsense's Alias model, and the install and removal run in a temporary root.
+# of OPNsense's Alias model, a blocked application's rules and the cut of its connections,
+# and the install and removal run in a temporary root.
 
 on:
   push:
@@ -61,6 +62,16 @@ jobs:
       # OPNsense's Alias model; and aliases.php's own run.
       - name: The aliases, through stand-ins of OPNsense's Alias model
         run: php tools/test-aliases.php
+
+      # A blocked application's connections cut: pf's states as pfctl -ss -vv writes them, the states a
+      # connection owns killed by their ids, os-xgs-npu's hwdrop.py (a stand-in) asked first within its
+      # deadline, and what it dropped handed back once the application is no longer blocked.
+      - name: The cut of a blocked application's connections, and the hand-back from hardware
+        run: python3 tools/test-cut.py
+
+      # The block rules the plugin registers, with stand-ins for OPNsense's Firewall Plugin and Alias model.
+      - name: The block rules of the applications blocked
+        run: php tools/test-rules.php
 
       # The page's API: the status passed on, the grids' rows, and Apply's order - the aliases, the
       # filter, cron, the tables of aliases gone, the classifier - with stand-ins for OPNsense's MVC base.

@@ -22,6 +22,18 @@
         <help>A table of its own for each application chosen, appcontrol_ and its name, holding servers it was seen with. Every nDPI category has a table without being chosen: appcontrol_cat_ and its name. The list is the installed nDPI's.</help>
     </field>
     <field>
+        <id>appcontrol.general.blocked</id>
+        <label>Blocked applications</label>
+        <type>select_multiple</type>
+        <help>Each application chosen is blocked: a table of its own, as in Application tables, and a block rule of this plugin's on it, ahead of the rules of Firewall: Rules, so a new connection from any interface to a server in the table is dropped - on every port, so another service on the same address is blocked as well. A connection nDPI names as it from its packets is cut once its window is judged, some 10 to 70 seconds after it began: its pf states killed by its two ends and, with Cut in hardware on in os-xgs-npu's XGS: Settings, dropped on the coprocessor first. Its server goes into the table only when the firewall's own resolver gives that address for the name the connection carried, since a device can write any name to any address, and only when nothing named that address, within the address expiry, as an application not blocked; else that connection alone is cut. Those it named earlier and still remembers are cut at Apply. A guess, a connection whose beginning was not seen, and one to the firewall, a host of its internal networks or an address not on the internet - private, shared or unique-local - are never cut. Choosing a protocol that carries others - TLS, QUIC, HTTP, DNS - blocks every application it carries. None chosen, or classifying off: nothing is blocked.</help>
+    </field>
+    <field>
+        <id>appcontrol.general.block_log</id>
+        <label>Log what is blocked</label>
+        <type>checkbox</type>
+        <help>Log each packet the block rules drop, in Firewall: Log Files: Live View, under the rule's description: Application Control: block and the application's name. Off, they are counted on the Applications tab, not logged.</help>
+    </field>
+    <field>
         <id>appcontrol.general.ttl</id>
         <label>Address expiry (seconds)</label>
         <type>text</type>

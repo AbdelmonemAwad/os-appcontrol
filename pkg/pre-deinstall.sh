@@ -2,10 +2,10 @@
 # Copyright (C) 2026 Abdelmonem Awad <eg2@live.com>. BSD 2-Clause License.
 #
 # Run by pkg(8) before the files of os-appcontrol are removed. The rc script that stops the
-# classifier and aliases.php that takes the aliases out are packaged files: by post-deinstall they are
-# gone. So the classifier is stopped here, and the aliases of the plugin are taken out of Firewall:
-# Aliases through OPNsense's own model - switched off instead where a rule or a setting still names
-# one.
+# classifier, aliases.php that takes the aliases out and cut.py that hands back from hardware what a
+# cut dropped are packaged files: by post-deinstall they are gone. So the classifier is stopped here,
+# the aliases of the plugin are taken out of Firewall: Aliases through OPNsense's own model - switched
+# off instead where a rule or a setting still names one - and what was dropped in hardware handed back.
 #
 # pkg runs the old package's pre-deinstall in an upgrade too, where nothing is to go: the aliases and
 # their addresses stay, and the new package's post-install starts the classifier again with the new
@@ -26,4 +26,7 @@ fi
 
 if [ -f /usr/local/sbin/configctl ]; then
 	/usr/local/sbin/configctl appcontrol remove > /dev/null 2>&1 || true
+	# no alias of the plugin's switched on now, so no application is blocked: what a cut dropped on the
+	# coprocessor is handed back to the host while cut.py is still there
+	/usr/local/sbin/configctl appcontrol release > /dev/null 2>&1 || true
 fi

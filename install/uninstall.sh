@@ -4,9 +4,10 @@
 # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
 #
 # Remove the Application Control plugin: the classifier stopped, its aliases taken out of
-# Firewall: Aliases - switched off instead where a rule or a setting still names one - its files, its
-# state in /var/db/os-appcontrol, and the addresses its tables held. Kept: the settings in config.xml,
-# and the package ndpi unless install/install.sh installed it and no other package needs it.
+# Firewall: Aliases - switched off instead where a rule or a setting still names one - so its block
+# rules go at the filter reload, what it dropped in hardware handed back, its files, its state in
+# /var/db/os-appcontrol, and the addresses its tables held. Kept: the settings in config.xml, and the
+# package ndpi unless install/install.sh installed it and no other package needs it.
 
 # the classifier and its aliases first, while the files that stop and remove them are there
 /usr/local/etc/rc.d/appcontrol onestop > /dev/null 2>&1 || true
@@ -15,6 +16,9 @@
 /bin/pkill -f 'daemon: [a]ppcontrol\[' 2> /dev/null || true
 /bin/pkill -f '/usr/local/opnsense/scripts/[a]ppcontrol/' 2> /dev/null || true
 configctl appcontrol remove > /dev/null 2>&1 || true
+# with no alias of the plugin's switched on, no application is blocked: every connection a cut dropped on
+# the coprocessor is handed back to the host (os-xgs-npu's hwdrop.py; nothing to do without it)
+configctl appcontrol release > /dev/null 2>&1 || true
 
 NDPI=
 [ -f /usr/local/share/os-appcontrol/ndpi-installed ] && NDPI=ours
@@ -45,7 +49,15 @@ configctl filter reload skip_alias > /dev/null 2>&1 || true
 configctl cron restart > /dev/null 2>&1 || true
 # The tables of the plugin's aliases that are gone, taken out of pf when no rule uses them: a table outlives
 # its alias and goes on holding the addresses (os-blocklists, 2026-10-29). One whose alias is still in
-# Firewall: Aliases - switched off, as something names it - is OPNsense's to keep.
+# Firewall: Aliases - switched off, as something names it - is OPNsense's to keep. The reload above may still be
+# loading the rules without the block rules when this looks - on the second XGS 3300 (2026-11-20) appcontrol_YouTube
+# was still a rule's then, and stayed in pf - so pf is given 30 seconds at most to let go of the plugin's tables.
+waited=0
+while [ ${waited} -lt 30 ] && /sbin/pfctl -v -s Tables 2> /dev/null |
+    awk '$2 ~ /^appcontrol_/ && $1 ~ /r/ { used = 1 } END { exit !used }'; do
+    sleep 1
+    waited=$((waited + 1))
+done
 /sbin/pfctl -v -s Tables 2> /dev/null | awk '$2 ~ /^appcontrol_/ && $1 !~ /r/ { print $2 }' |
 while read -r table; do
     grep -q "<name>${table}</name>" /conf/config.xml 2> /dev/null && continue
