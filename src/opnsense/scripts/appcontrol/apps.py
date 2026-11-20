@@ -54,14 +54,19 @@ def package_version(pkg=PKG):
 
 def refresh(reader=ndpi.NDPIREADER, path=tables.CATALOGUE, fallback=CATEGORIES, pkg=PKG):
     """What the installed nDPI knows, written to path: its categories by -a 1 (categories.json when it
-    gives none), its protocols with their categories by -H, the package's version."""
+    gives none), its protocols with their categories by -H, the names it knows each by from its host table
+    (--protos-dump 1, for the Suricata rules of the Rules tab), the package's version."""
     out = {'read_at': int(time.time()), 'installed': ndpi.installed(reader), 'errors': []}
     categories, source = {}, None
     help_text = ''
+    hosts = {}
     if out['installed']:
         categories = ndpi.parse_categories(ndpi.run_text([reader, '-a', '1']))
         source = 'ndpiReader -a 1'
         help_text = ndpi.run_text([reader, '-H'])
+        hosts = ndpi.parse_hosts(ndpi.run_text([reader, '--protos-dump', '1']), ndpi.parse_protocol_ids(help_text))
+        if not hosts:
+            out['errors'].append('ndpiReader --protos-dump 1 gave no name: a Suricata rule matches a protocol alone')
     if not categories:
         categories = committed(fallback)
         source = 'categories.json'
@@ -73,7 +78,7 @@ def refresh(reader=ndpi.NDPIREADER, path=tables.CATALOGUE, fallback=CATEGORIES, 
         out['errors'].append(problem)
     found = VERSION.search(help_text)
     out.update({'categories': {str(k): v for k, v in sorted(categories.items())}, 'categories_from': source,
-                'protocols': protocols, 'reader': found.group(1) if found else None,
+                'protocols': protocols, 'hosts': hosts, 'reader': found.group(1) if found else None,
                 'version': package_version(pkg) if out['installed'] else None})
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -105,6 +110,7 @@ def main(argv):
         out = refresh()
         print(json.dumps({'installed': out['installed'], 'categories': len(out['categories']),
                           'categories_from': out['categories_from'], 'protocols': len(out['protocols']),
+                          'hosts': sum(len(names) for names in out['hosts'].values()),
                           'version': out['version'], 'errors': out['errors']}))
     elif verb == 'list':
         catalogue = tables.load_catalogue()

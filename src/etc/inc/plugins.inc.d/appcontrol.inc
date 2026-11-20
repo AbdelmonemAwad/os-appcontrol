@@ -15,7 +15,8 @@
  *
  * The block rules (appcontrol_firewall()) are registered at every filter reload, the way os-blocklists
  * registers its own: never among the owner's rules in Firewall: Rules, so turning blocking off or
- * removing the plugin leaves nothing behind there.
+ * removing the plugin leaves nothing behind there. Those of Blocked applications are from any device; a
+ * block rule of the Rules tab gives one from its source alone.
  */
 
 use OPNsense\Firewall\Alias;
@@ -48,10 +49,23 @@ function appcontrol_enabled()
  * gives that address for the name the connection carried, and nothing named the address as an application
  * not blocked (cut.py) - a device cannot write a name to an address of its choosing and so have it blocked
  * for everyone. Priority 1 puts it before the owner's floating, group and interface rules (200000 to
- * 400000, FilterRuleField::getPriority()), as os-blocklists' rules are; quick, so the block is final - an
- * exception for one device is phase 3's (the plan's top-01). It stops new connections only: pf lets a
- * packet of a state it holds through before any rule, so the connections already open are cut by
- * classify.py and cut.py.
+ * 400000, FilterRuleField::getPriority()), as os-blocklists' rules are; quick, so the block is final. It
+ * stops new connections only: pf lets a packet of a state it holds through before any rule, so the
+ * connections already open are cut by classify.py and cut.py.
+ *
+ * A block rule of the Rules tab switched on gives the same two rules from its source alone, written as
+ * OPNsense's own rules write a source (Rule::mapAddressInfo()): any, an interface's network, an alias, an
+ * address or a network - several at once, or one inverted - so that a device outside it is let through to
+ * the same servers. An exception for one device is a rule whose source is every device but that one. A
+ * source OPNsense cannot read - an alias gone, say - leaves its rule switched off in the ruleset, as it
+ * does with its own. Its description says the source, as the page's interfaces are named.
+ *
+ * Each family takes the elements of its own (appcontrol_family_source()): an address or a network written by
+ * hand goes into the rule of its family alone - OPNsense keeps such an element as it is, and pfctl refuses a
+ * rule that holds an address of the other family alone ("rule expands to no valid combination"), and with it
+ * the firewall's whole ruleset - while an interface's network, an alias and any go into both. A family left
+ * with nothing gets no rule. Inverted, an address of one family leaves every device of the other family in
+ * the source: that family's rule is from any, as the classifier and the Suricata rules take it too.
  */
 function appcontrol_firewall(Plugin $fw)
 {
@@ -62,7 +76,7 @@ function appcontrol_firewall(Plugin $fw)
     }
     $general = $config['OPNsense']['AppControl']['general'] ?? [];
     if (!is_array($general)) {
-        return;
+        $general = [];
     }
     $blocked = [];
     foreach (explode(',', (string)($general['blocked'] ?? '')) as $app) {
@@ -70,12 +84,19 @@ function appcontrol_firewall(Plugin $fw)
             $blocked[trim($app)] = true;
         }
     }
-    if (empty($blocked)) {
+    $rules = [];
+    foreach (appcontrol_rules() as $rule) {
+        if ($rule['enabled'] && $rule['action'] === 'block') {
+            $rules[] = $rule;
+        }
+    }
+    if (empty($blocked) && empty($rules)) {
         return;
     }
     $log = (string)($general['block_log'] ?? '0') === '1';
     $prefix = 'Application Control: ';
 
+    $tables = [];
     foreach ((new Alias())->aliases->alias->iterateItems() as $alias) {
         $name = (string)$alias->name;
         $description = (string)$alias->description;
@@ -87,7 +108,11 @@ function appcontrol_firewall(Plugin $fw)
         if (strpos($name, 'appcontrol_cat_') === 0 && strpos($app, 'category ') === 0) {
             continue;
         }
-        if (!isset($blocked[$app]) || (string)$alias->enabled !== '1' || (string)$alias->type !== 'external') {
+        if ((string)$alias->enabled !== '1' || (string)$alias->type !== 'external') {
+            continue;
+        }
+        $tables[$app] = $name;
+        if (!isset($blocked[$app])) {
             continue;
         }
         foreach (['inet', 'inet6'] as $family) {
@@ -102,6 +127,128 @@ function appcontrol_firewall(Plugin $fw)
             ]);
         }
     }
+
+    foreach ($rules as $rule) {
+        if (!isset($tables[$rule['app']])) {
+            continue;
+        }
+        foreach (['inet', 'inet6'] as $family) {
+            $from = appcontrol_family_source($rule, $family);
+            if ($from === null) {
+                continue;
+            }
+            $fw->registerFilterRule(1, [
+                'ipprotocol' => $family,
+                'descr' => $prefix . 'block ' . $rule['app'] . ' from ' . appcontrol_source_text($rule),
+                'from' => implode(',', $from[0]),
+                'from_not' => $from[1],
+                'to' => '<' . $tables[$rule['app']] . '>',
+                'direction' => 'in',
+                'type' => 'block',
+                'log' => $log,
+                'quick' => true,
+            ]);
+        }
+    }
+}
+
+/*
+ * The family of an element of a source: 'inet' or 'inet6' for an address or a network written by hand - the
+ * family OPNsense's own rules give one (models/OPNsense/Firewall/Filter.php: an address or a subnet, IPv6 when it
+ * holds a colon) - and null for an interface's network, an alias or any, which pf takes in either family.
+ */
+function appcontrol_address_family($element)
+{
+    $parts = explode('/', $element, 2);
+    if (filter_var($parts[0], FILTER_VALIDATE_IP) === false) {
+        return null;
+    }
+    if (count($parts) == 2 && (!ctype_digit($parts[1]) || (int)$parts[1] > (strpos($parts[0], ':') === false ? 32 : 128))) {
+        return null;
+    }
+    return strpos($parts[0], ':') === false ? 'inet' : 'inet6';
+}
+
+/*
+ * A rule's source for one family's pf rule: [elements, inverted], or null when that family gets no rule. The
+ * elements of the family's own - a written address of the other family left out; none left, no rule. Inverted, a
+ * written address of the other family leaves every device of this one: from any, not inverted.
+ */
+function appcontrol_family_source($rule, $family)
+{
+    $own = [];
+    $other = false;
+    foreach ($rule['source'] as $element) {
+        $found = appcontrol_address_family($element);
+        if ($found === null || $found === $family) {
+            $own[] = $element;
+        } else {
+            $other = true;
+        }
+    }
+    if ($rule['not']) {
+        return empty($own) && $other ? [['any'], false] : (empty($own) ? null : [$own, true]);
+    }
+    return empty($own) ? null : [$own, false];
+}
+
+/*
+ * The rules of the Rules tab as config.xml holds them, in their order: [['uuid', 'enabled', 'action', 'app',
+ * 'source' => [element], 'not', 'description']]. One with no application, no source or an action of another
+ * kind is switched off, as tables.py's rules() has it.
+ */
+function appcontrol_rules()
+{
+    global $config;
+
+    $found = $config['OPNsense']['AppControl']['rules']['rule'] ?? [];
+    if (!is_array($found)) {
+        return [];
+    }
+    if (isset($found['app']) || isset($found['@attributes'])) {
+        /* one rule, read without the list it would make with two */
+        $found = [$found];
+    }
+    $out = [];
+    foreach ($found as $rule) {
+        if (!is_array($rule)) {
+            continue;
+        }
+        $action = trim((string)($rule['action'] ?? 'block'));
+        $app = trim((string)($rule['app'] ?? ''));
+        $source = array_values(array_filter(array_map('trim', explode(',', (string)($rule['source'] ?? ''))), 'strlen'));
+        $out[] = [
+            'uuid' => (string)($rule['@attributes']['uuid'] ?? ''),
+            'enabled' => (string)($rule['enabled'] ?? '1') === '1' && in_array($action, ['block', 'alert'], true) &&
+                $app !== '' && !empty($source),
+            'action' => $action,
+            'app' => $app,
+            'source' => $source,
+            'not' => (string)($rule['source_not'] ?? '0') === '1',
+            'description' => (string)($rule['description'] ?? ''),
+        ];
+    }
+    return $out;
+}
+
+/*
+ * A rule's source as the firewall's pages name it: an interface's network by the interface's description, the
+ * rest as written; "not" before it when inverted.
+ */
+function appcontrol_source_text($rule)
+{
+    global $config;
+
+    $names = [];
+    foreach ($rule['source'] as $element) {
+        $interface = $config['interfaces'][$element] ?? null;
+        if (is_array($interface)) {
+            $names[] = (!empty($interface['descr']) ? $interface['descr'] : strtoupper($element)) . ' net';
+        } else {
+            $names[] = $element;
+        }
+    }
+    return ($rule['not'] ? 'not ' : '') . implode(', ', $names);
 }
 
 function appcontrol_services()

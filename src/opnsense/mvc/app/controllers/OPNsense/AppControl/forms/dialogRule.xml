@@ -1,0 +1,43 @@
+<!--
+    SPDX-License-Identifier: BSD-2-Clause
+    Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
+-->
+<form>
+    <field>
+        <id>rule.enabled</id>
+        <label>Enabled</label>
+        <type>checkbox</type>
+        <help>Switched off, the rule does nothing, and keeps its place.</help>
+    </field>
+    <field>
+        <id>rule.action</id>
+        <label>Action</label>
+        <type>dropdown</type>
+        <help>Block: a block rule of this plugin's on the application's table, from the source alone and ahead of the rules of Firewall: Rules, so a new connection from there to a server in the table is dropped; the connections nDPI names as the application from there cut, some 10 to 70 seconds after they began - in hardware too, where os-xgs-npu is installed with Cut in hardware on; and a Suricata rule that drops them on their way to the internet in the Intrusion Detection's IPS mode and alerts in its IDS mode - never a connection to the firewall itself or to its own networks. Alert: a Suricata rule that alerts on them, nothing blocked.</help>
+    </field>
+    <field>
+        <id>rule.source</id>
+        <label>Source</label>
+        <type>text</type>
+        <style>net_selector net_selector_multi</style>
+        <help>The devices the rule is for: any, an interface's network - the guest network, say, or a group's such as OpenVPN's - an alias, or an address or a network written by hand. Several at once, but any, and an address or a network written by hand, only alone. Not the firewall itself nor one of its addresses: no device connects through it from there.</help>
+    </field>
+    <field>
+        <id>rule.source_not</id>
+        <label>Invert source</label>
+        <type>checkbox</type>
+        <help>Every device but those of the source: a block for every device except one, say. One item only. An address written by hand leaves out that address alone, not the same device's address of the other family: an alias holding both does.</help>
+    </field>
+    <field>
+        <id>rule.app</id>
+        <label>Application</label>
+        <type>dropdown</type>
+        <help>As the installed nDPI names it. A protocol that carries others - TLS, QUIC, HTTP - takes every application it carries. Suricata matches the names nDPI knows the application by, and its protocol when Suricata reads that protocol itself; one it can tell by neither gets no Suricata rule, and the rest still acts.</help>
+    </field>
+    <field>
+        <id>rule.description</id>
+        <label>Description</label>
+        <type>text</type>
+        <help>For your reference; Suricata's alerts carry it too.</help>
+    </field>
+</form>

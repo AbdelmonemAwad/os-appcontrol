@@ -63,6 +63,23 @@ waits for a cut of an application no longer blocked is dropped. SIGHUP has the s
 next window's close, the installed nDPI's catalogue as aliases.php last read it - without a restart,
 which would forget what is remembered.
 
+RULES (phase 3). A block rule of the Rules tab blocks its application for the devices of its source
+alone - an interface's network, an alias, an address or a network, or every device but those of one of
+them: its pf block rule is from that source, and a connection is cut only when its device - the client's
+address - is one of it (cut_as()). Each source is read as pf holds it (Where): an interface's networks
+from ifconfig -a, an alias's table from pfctl, again at each window's close; one that cannot be read
+holds no device, and nothing is cut for it. Blocked for every device by Blocked applications, an
+application is cut whoever sends. A server two applications share goes into the table of one only when
+the other's block reaches every device the first one's does (tables.covers()); else that connection
+alone is cut. Each cut is counted for the rule that made it.
+
+The Suricata rules of the Rules tab follow the same sources: while a rule is switched on, suricata_rules.py
+runs beside the capture, not waited for - `start` as the service starts, at boot among them, writing them as
+the settings say, as the service reads its own; then `refresh` every SURICATA_EVERY seconds, the rules last
+applied resolved again - an alias whose table changed, a new delegated prefix, the installed nDPI's names -
+the file written and the Intrusion Detection told only when that changed it. What it could not do is the
+page's last error.
+
 What it found goes to /var/db/os-appcontrol: status.json (the page's cards and Applications) and
 unknown.json (the page's Unknown), written after every window. Nothing is held on the firewall: no
 connection waits for its classification, and an allowed one goes into hardware on os-xgs-npu's own
@@ -90,7 +107,6 @@ import fcntl                                                             # noqa:
 import ipaddress                                                         # noqa: E402
 import json                                                              # noqa: E402
 import os                                                                # noqa: E402
-import re                                                                # noqa: E402
 import select                                                            # noqa: E402
 import socket                                                            # noqa: E402
 import struct                                                            # noqa: E402
@@ -98,7 +114,6 @@ import subprocess                                                        # noqa:
 import sys                                                               # noqa: E402
 import syslog                                                            # noqa: E402
 import time                                                              # noqa: E402
-import xml.etree.ElementTree as ET                                       # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apps                                                              # noqa: E402
@@ -124,10 +139,15 @@ RETRY_MOST = 600.0          # it stops again, up to this
 BEHIND = 2                  # windows past their close with none being judged that mean the clock stepped
                             # forward: a window judged past TIMEOUT leaves at most two behind
 CUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cut.py')
+POLICY = 'policy.json'      # in the work directory: what is blocked, for whom, as the service holds it, for cut.py
 CUT_TIMEOUT = 120           # seconds a cut may take - cut.py ends its kills at its own BUDGET, 90 s, before it
 CUT_MOST = 5000             # connections one cut takes; the rest wait for the next
 CUT_WAITING = 20000         # connections waiting for a cut at most; past it the oldest are left uncut, and said
 CUT_TRIES = 2               # runs a connection is given: one stopped at its time, or past cut.py's own, goes again
+SURICATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'suricata_rules.py')
+SURICATA_EVERY = 300        # seconds between two looks at the Suricata rules' sources and names: each change
+                            # installs every rule of the Intrusion Detection again
+SURICATA_TIMEOUT = 900      # seconds a look may take - its reload of the Intrusion Detection's rules among them
 REMEMBER = 50000            # connections named here remembered, for a cut when their application is blocked
 REMEMBER_FOR = 86400        # seconds: pf keeps an established TCP connection a day without a packet
 NAMES_MOST = 20000          # servers whose names are kept, to tell one an application not blocked shares
@@ -136,9 +156,9 @@ NAMES_EACH = 4              # names kept of each server, the latest
 # firewall. The tests, whose addresses are all documentation ones, put the documentation networks here.
 ALSO_GLOBAL = ()
 
-DYNAMIC_V4 = ('dhcp', 'pppoe', 'pptp', 'l2tp', 'ppp')
-DYNAMIC_V6 = ('dhcp6', 'slaac', '6rd', '6to4', 'pppoe')
-NOT_WATCHED = ('lo', 'enc', 'pflog', 'pfsync')
+DYNAMIC_V4 = tables.DYNAMIC_V4
+DYNAMIC_V6 = tables.DYNAMIC_V6
+NOT_WATCHED = tables.NOT_WATCHED
 
 running = True
 
@@ -157,41 +177,8 @@ def write_json(path, data):
 
 def interfaces(conf, path=CONFIG):
     """[(key, device)] watched: the interfaces chosen in Settings that are switched on; with none chosen,
-    every internal one - switched on, not the WAN, no gateway of its own nor one in System: Gateways, an
-    address of its own that is not obtained from upstream. Read again at each window's close."""
-    try:
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError):
-        return []
-    found = root.find('interfaces')
-    routed = {(g.findtext('interface') or '').strip() for g in root.findall('gateways/gateway_item')}
-    out = []
-    for node in (list(found) if found is not None else []):
-        key, dev = node.tag, (node.findtext('if') or '').strip()
-        if not dev or node.find('enable') is None or dev.startswith(NOT_WATCHED):
-            continue
-        if conf['interfaces']:
-            if key in conf['interfaces']:
-                out.append((key, dev))
-            continue
-        if key == 'wan' or key in routed or node.find('internal_dynamic') is not None:
-            continue
-        if (node.findtext('gateway') or '').strip() or (node.findtext('gatewayv6') or '').strip():
-            continue
-        v4, v6 = (node.findtext('ipaddr') or '').strip(), (node.findtext('ipaddrv6') or '').strip()
-        if v4 in DYNAMIC_V4 or v6 in DYNAMIC_V6:
-            continue
-        if _is_address(v4) or _is_address(v6) or v6 == 'track6':
-            out.append((key, dev))
-    return out
-
-
-def _is_address(text):
-    try:
-        ndpi.ipaddress.ip_address(text)
-        return True
-    except ValueError:
-        return False
+    every internal one (tables.interfaces()). Read again at each window's close."""
+    return tables.interfaces(conf['interfaces'], path)
 
 
 def lan_devices(watched, path=CONFIG):
@@ -207,11 +194,13 @@ class Network:
     when the connection is ICMP; and while the addresses have not been read, none does."""
 
     REASONS = ('icmp', 'address', 'own', 'lan', 'unread')
-    HEAD = re.compile(r'^(\S+?):\s+flags=')
+    HEAD = tables.IFCONFIG_HEAD
     LIMITED = ipaddress.ip_address('255.255.255.255')
 
     def __init__(self, text='', lan=()):
         self.own, self.networks, self.broadcast = set(), set(), {self.LIMITED}
+        # every device's networks, for the sources of the block rules (Where)
+        self.by_dev = tables.device_networks(text)
         dev = None
         for line in text.splitlines():
             head = self.HEAD.match(line)
@@ -221,7 +210,7 @@ class Network:
             words = line.split()
             if dev is None or len(words) < 2 or words[0] not in ('inet', 'inet6'):
                 continue
-            found = _interface(words)
+            found = tables.ifconfig_address(words)
             if found is None:
                 continue
             self.own.add(found.ip)
@@ -268,27 +257,8 @@ def internet(server):
     return address.is_global or any(address in net for net in ALSO_GLOBAL if net.version == address.version)
 
 
-def _interface(words):
-    """The address and its network of one inet or inet6 line of ifconfig, in any of the ways it writes
-    them - 'inet 192.0.2.1 netmask 0xffffff00', 'inet 192.0.2.1/24', 'inet6 fe80::1%em0 prefixlen 64';
-    None for a line read as none of them."""
-    text, prefix = words[1], None
-    if '/' in text:
-        text, prefix = text.rsplit('/', 1)
-    text = text.split('%')[0]
-    for i, word in enumerate(words[2:-1], 2):
-        if word == 'netmask':
-            try:
-                mask = words[i + 1]
-                prefix = bin(int(mask, 16) if mask.startswith('0x') else int(ipaddress.IPv4Address(mask))).count('1')
-            except ValueError:
-                return None
-        elif word == 'prefixlen':
-            prefix = words[i + 1]
-    try:
-        return ipaddress.ip_interface(text if prefix is None else '%s/%s' % (text, prefix))
-    except ValueError:
-        return None
+# Where the sources of the block rules are: tables.py's, which cut.py judges a connection's device by too
+Where = tables.Where
 
 
 def in_memory(path, mount=MOUNT):
@@ -341,10 +311,16 @@ class State:
         self.dropped = 0                # windows dropped as the clock stepped
         self.stopped = None
         self.blocking = {}              # {application: its table}, as last read (tables.blocked())
+        self.policy = {}                # {application: whom it is blocked for}, as last read (tables.policy())
+        self.where = Where()            # the sources of the block rules, resolved
+        self.where_held = None          # what they held at the last look at what is blocked (Where.digest())
+        self.devices = {}               # {interface: device}, as config.xml last said
+        self.unread_said = set()        # the elements of a source said not to be read
         self.remembered = {}            # packed() of its two ends -> (name, began, name it carried), oldest first
         self.to_cut = []                # connections waiting for cut.py
         self.names_at = {}              # server -> {name nDPI gave it: when, on the monotonic clock}
         self.last_cut = None
+        self.rule_cut = {}              # the connections cut for each rule - '' for Blocked applications
 
     def fail(self, message, now=None):
         self.error = {'at': now or time.time(), 'message': message}
@@ -363,7 +339,8 @@ class State:
                        'categories': len(self.catalogue.get('categories') or {}),
                        'protocols': len(self.catalogue.get('protocols') or {})},
             'blocking': sorted(self.blocking), 'remembered': len(self.remembered),
-            'waiting_cut': len(self.to_cut), 'last_cut': self.last_cut,
+            'waiting_cut': len(self.to_cut), 'last_cut': self.last_cut, 'rule_cut': dict(self.rule_cut),
+            'unread_sources': dict(sorted(self.where.unread.items())),
         }
 
     def unknown_rows(self):
@@ -438,11 +415,31 @@ def forget_remembered(state, mono):
         del state.remembered[key]
 
 
-def blocked_as(name, blocking):
-    """The application blocked that a connection nDPI named so is cut as - nDPI's application, else the
-    protocol carrying it - or None."""
+def cut_as(state, name, client):
+    """(application, rule) that a connection nDPI named so, from the device at `client`, is cut as - nDPI's
+    application, else the protocol carrying it - when it is blocked for every device (rule '') or by a block
+    rule whose source holds the device (the rule's uuid); or None."""
     master, app = ndpi.split_name(name)
-    return app if app in blocking else master if master in blocking else None
+    for candidate in (app, master) if app != master else (app,):
+        found = state.policy.get(candidate)
+        if found is None:
+            continue
+        if found['everyone']:
+            return candidate, ''
+        for rule in found['rules']:
+            if state.where.holds(rule, client):
+                return candidate, rule['uuid']
+    return None
+
+
+def name_scope(state, name):
+    """Whom a block of what nDPI named so reaches: its application's and the carrying protocol's, together
+    (tables.scope()); nobody when neither is blocked."""
+    master, app = ndpi.split_name(name)
+    scopes = [tables.scope(state.policy[c]) for c in {app, master} if c in state.policy]
+    if any(s == tables.EVERYONE for s in scopes):
+        return tables.EVERYONE
+    return frozenset().union(*scopes)
 
 
 def note(state, server, name, mono):
@@ -458,24 +455,27 @@ def note(state, server, name, mono):
         del state.names_at[next(iter(state.names_at))]
 
 
-def shared(state, server, mono):
-    """Whether nDPI named the server, within the address expiry, as an application that is not blocked: its
-    address serves that one too, and a block of it would stop that one for every device. A protocol named
-    alone - TLS, QUIC, HTTP with no application on top - is no other application."""
+def shared(state, server, mono, app):
+    """Whether nDPI named the server, within the address expiry, as an application whose block does not reach
+    every device `app`'s block does (tables.covers()) - one not blocked at all, or blocked for other devices:
+    its address serves that one too, and putting it in `app`'s table would stop that one for devices it is
+    let through for. A protocol named alone - TLS, QUIC, HTTP with no application on top - is no other
+    application."""
     horizon = mono - state.conf.get('ttl', tables.TTL)
+    mine = tables.scope(state.policy.get(app))
     for name, when in (state.names_at.get(server) or {}).items():
-        if when >= horizon and not ndpi.carried_only(name) and blocked_as(name, state.blocking) is None:
+        if when >= horizon and not ndpi.carried_only(name) and not tables.covers(name_scope(state, name), mine):
             return True
     return False
 
 
-def queue_cut(state, key, name, client, server, proto, began, app, host='', alone=False):
+def queue_cut(state, key, name, client, server, proto, began, app, host='', alone=False, rule=''):
     """A connection of a blocked application, for cut.py: forgotten here, as it is being cut. host is the
     name it carried; alone, its server is kept out of its application's table whatever the resolver says
-    (shared())."""
+    (shared()); rule, the block rule it is cut for - '' for Blocked applications."""
     state.remembered.pop(key, None)
     state.to_cut.append({'proto': proto, 'client': list(client), 'server': list(server), 'name': name, 'app': app,
-                         'began': began, 'host': host, 'alone': alone})
+                         'began': began, 'host': host, 'alone': alone, 'rule': rule})
 
 
 def trim_cut(state, now):
@@ -508,46 +508,70 @@ def requeue(state, conns, now, why):
     return len(again)
 
 
-def block(state, aliases, mono=None):
-    """The applications blocked now (tables.blocked()). What waits for a cut of an application no longer
-    blocked is dropped. For one blocked since the last look, every connection remembered as it is queued to
-    be cut - its server put in the table by cut.py, as any other's - and its table given back to be emptied
-    first: what went into it while it was not blocked went in on a name alone. ({application: table},
-    [tables to empty])."""
+def block(state, aliases, mono=None, pf=None):
+    """The applications blocked now (tables.policy()) - for every device, or for the sources of block rules,
+    each element of a new source resolved (Where). What waits for a cut is looked at again: a connection no
+    longer blocked for its device is dropped from the queue, counted; one blocked another way now - by another
+    rule, or as another application - is cut that way, whether its server is shared worked out again for it.
+    When what is blocked has changed - the policy, or what its sources hold: an alias that gained a device -
+    every connection remembered is looked at, and one blocked now for its device is queued to be cut - its
+    server put in its table by cut.py, as any other's. The tables of the applications blocked since the last
+    look are given back to be emptied first: what went into them while they were not blocked went in on a name
+    alone. ({application: table}, [tables to empty])."""
     mono = time.monotonic() if mono is None else mono
-    blocked = tables.blocked(state.conf, aliases)
+    found = tables.policy(state.conf, aliases)
+    blocked = {app: entry['table'] for app, entry in found.items()}
     newly = {app: table for app, table in blocked.items() if state.blocking.get(app) != table}
-    state.blocking = blocked
-    kept = [c for c in state.to_cut if c.get('app') in blocked]
+    changed = found != state.policy
+    state.policy, state.blocking = found, blocked
+    state.where.ensure(found, pf or tables.Pf())
+    held_now = state.where.digest()
+    changed = changed or held_now != state.where_held
+    state.where_held = held_now
+    kept = []
+    for conn in state.to_cut:
+        hit = cut_as(state, str(conn.get('name') or conn.get('app') or ''), str((conn.get('client') or [''])[0]))
+        if hit is not None:
+            again = dict(conn, app=hit[0], rule=hit[1])
+            if changed or hit[0] != conn.get('app'):
+                # shared with another application or not is a question of whom each block reaches: asked again
+                again['alone'] = shared(state, str((conn.get('server') or [''])[0]), mono, hit[0])
+            kept.append(again)
     if len(kept) != len(state.to_cut):
         state.totals['cut_unblocked'] += len(state.to_cut) - len(kept)
     state.to_cut = kept
-    if newly:
+    if changed:
         waiting = len(state.to_cut)
         for key, (name, began, host) in list(state.remembered.items()):
-            hit = blocked_as(name, newly)
+            proto, client, server = unpacked(key)
+            hit = cut_as(state, name, client[0])
             if hit is None:
                 continue
-            proto, client, server = unpacked(key)
             if not internet(server[0]):
                 state.remembered.pop(key, None)
                 state.totals['not_internet'] += 1
                 continue
-            queue_cut(state, key, name, client, server, proto, began, hit, host, shared(state, server[0], mono))
+            queue_cut(state, key, name, client, server, proto, began, hit[0], host, shared(state, server[0], mono, hit[0]),
+                      hit[1])
         state.totals['to_cut'] += len(state.to_cut) - waiting
     return blocked, sorted(set(newly.values()))
 
 
-def untable(state, pf, blocked_tables, allowed):
-    """The servers of `allowed` - named in this window as an application not blocked - taken out of each
-    blocked table that holds them: they serve that application too. How many."""
+def untable(state, pf, seen):
+    """The servers named in this window - seen, {server: {name}} - as an application whose block does not reach
+    every device a blocked table's block does, taken out of that table: they serve that application too, for
+    devices it is let through for. How many."""
     out = 0
-    if not allowed:
-        return out
-    for table in sorted(blocked_tables):
-        gone = sorted(set(pf.show(table) or ()) & allowed)
+    for app in sorted(state.policy):
+        found = state.policy[app]
+        mine = tables.scope(found)
+        wrong = {server for server, names in seen.items()
+                 if any(not ndpi.carried_only(n) and not tables.covers(name_scope(state, n), mine) for n in names)}
+        if not wrong:
+            continue
+        gone = sorted(set(pf.show(found['table']) or ()) & wrong)
         if gone:
-            pf.delete(table, gone)
+            pf.delete(found['table'], gone)
             out += len(gone)
     state.totals['untabled'] += out
     return out
@@ -570,30 +594,30 @@ def apply(state, records, pf, aliases, now, mono=None):
     begun here, into their category's table and their chosen application's - unless state.network
     says why not, which is counted; guesses and unknown connections into the Unknown list, never into
     a table, and those named by a protocol alone when they were begun here. A connection of an
-    application blocked - or of the protocol carrying it - whose server would go into a table is queued
-    to be cut (state.to_cut) when its server is an address of the internet, with the name it carried; its
-    server goes into the blocked table by cut.py alone, once the resolver vouches for it. One that is not
-    blocked, and was not seen to end, is remembered for when it is. now is the wall clock's, for the page;
-    mono the monotonic clock's, for what is kept."""
+    application blocked for its device - or of the protocol carrying it (cut_as()) - whose server would go
+    into a table is queued to be cut (state.to_cut) when its server is an address of the internet, with the
+    name it carried and the rule it is cut for; its server goes into the blocked table by cut.py alone, once
+    the resolver vouches for it. One that is not blocked for its device, and was not seen to end, is
+    remembered for when it is. now is the wall clock's, for the page; mono the monotonic clock's, for what is
+    kept."""
     mono = time.monotonic() if mono is None else mono
     protocols = state.catalogue.get('protocols') or {}
     chosen = tables.tabled(state.conf)
     puts = {}
     forget_remembered(state, mono)
-    blocked, emptied = block(state, aliases, mono)
+    blocked, emptied = block(state, aliases, mono, pf)
     for table in emptied:
         pf.flush(table)
     waiting = len(state.to_cut)
     blocked_tables = set(blocked.values())
     # every name the window gives a server first, so that whether a server is shared does not hang on the order
-    allowed = set()
+    seen = {}
     for kind, name, flow, row in records:
         if kind == 'named' and flow is not None and flow.started and not state.network.why_not(flow.proto,
                                                                                               flow.server[0]):
             note(state, flow.server[0], name, mono)
-            if not ndpi.carried_only(name) and blocked_as(name, blocked) is None:
-                allowed.add(flow.server[0])
-    untabled = untable(state, pf, blocked_tables, allowed)
+            seen.setdefault(flow.server[0], set()).add(name)
+    untabled = untable(state, pf, seen)
     counts = {'flows': 0, 'named': 0, 'guessed': 0, 'unknown': 0, 'no_app': 0, 'not_tabled': 0, 'not_internet': 0}
     for kind, name, flow, row in records:
         counts['flows'] += 1
@@ -630,11 +654,12 @@ def apply(state, records, pf, aliases, now, mono=None):
                     # a blocked application's table takes a server by cut.py alone, once the resolver vouches
                     if table and table not in blocked_tables:
                         puts.setdefault(table, set()).add(server[0])
-                hit = blocked_as(name, blocked)
+                hit = cut_as(state, name, flow.client[0])
                 if hit is not None:
                     if internet(server[0]):
                         queue_cut(state, packed(flow.proto, flow.client, flow.server), name, flow.client, flow.server,
-                                  flow.proto, flow.began, hit, server_name, shared(state, server[0], mono))
+                                  flow.proto, flow.began, hit[0], server_name, shared(state, server[0], mono, hit[0]),
+                                  hit[1])
                     else:
                         counts['not_internet'] += 1
                 elif not flow.ended and not (flow.proto == capture.UDP and flow.packets <= 2):
@@ -938,7 +963,13 @@ class Cutter:
     not waited for, one run at a time; its answer, read when it ends, counted in the state. The list goes
     to it as a file in the work directory, in memory, removed once the run is over. A run past CUT_TIMEOUT
     is stopped and its connections queued again, as are those cut.py says it did not reach before its own
-    budget ran out: each connection is given CUT_TRIES runs (requeue())."""
+    budget ran out: each connection is given CUT_TRIES runs (requeue()).
+
+    What is blocked, for whom, goes to it as the service holds it - tables.policy() as the last Apply put it in
+    force, read at the start and at each SIGHUP - in a file of the run's (POLICY), written again at a SIGHUP while
+    the run goes (keep_policy()): cut.py judges each connection by it, not by config.xml as saved, where a rule
+    changed and not applied would stop the cut and not the pf block; and a run under way sees a SIGHUP's change
+    before its kills."""
 
     def __init__(self, work, script=CUT):
         self.work, self.script = work, script
@@ -947,6 +978,18 @@ class Cutter:
         self.started = 0.0
         self.runs = 0
         self.paths = ()
+        self.policy_path = os.path.join(work, POLICY)
+
+    def keep_policy(self, state, now=None):
+        """The policy the service acts on now, written for the run going, if one goes."""
+        if self.proc is not None:
+            self._policy(state, now)
+
+    def _policy(self, state, now):
+        try:
+            write_json(self.policy_path, {'policy': state.policy})
+        except OSError as error:
+            state.fail('what is blocked could not be written for cut.py: %s' % error, now)
 
     def start(self, state, now):
         if self.proc is not None or not state.to_cut:
@@ -954,12 +997,13 @@ class Cutter:
         batch, state.to_cut = state.to_cut[:CUT_MOST], state.to_cut[CUT_MOST:]
         self.runs += 1
         base = os.path.join(self.work, 'cut-%d' % self.runs)
-        self.paths = (base + '.json', base + '.out')
+        self.paths = (base + '.json', base + '.out', self.policy_path)
+        self._policy(state, now)
         try:
             write_json(self.paths[0], batch)
             with open(self.paths[1], 'w') as out:
-                self.proc = subprocess.Popen([self.script, 'cut', self.paths[0]], stdin=subprocess.DEVNULL,
-                                             stdout=out, stderr=subprocess.DEVNULL)
+                self.proc = subprocess.Popen([self.script, 'cut', self.paths[0], self.policy_path],
+                                             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.DEVNULL)
         except OSError as error:
             self.proc = None
             self._remove()
@@ -1023,6 +1067,89 @@ class Cutter:
                 pass
 
 
+class SuricataRules:
+    """suricata_rules.py beside the capture, not waited for, one run at a time, while a rule of the Rules tab is
+    switched on: `start` once as the service starts - the rules written as the settings say, which the service
+    reads itself then - and `refresh` every SURICATA_EVERY seconds after: what was applied resolved again, and the
+    Intrusion Detection told only when the file changed (the script runs configctl ids reload itself). Its answer is
+    a file in the work directory, read when it ends; what it could not do is the page's last error. A run past
+    SURICATA_TIMEOUT is stopped. No script (None): nothing run."""
+
+    def __init__(self, work, script=SURICATA):
+        self.work, self.script = work, script
+        self.proc = None
+        self.started = 0.0
+        self.next_at = None
+        self.runs = 0
+        self.path = None
+
+    def due(self, state):
+        return (self.script is not None and self.proc is None and bool(tables.ruled(state.conf))
+                and (self.next_at is None or time.monotonic() >= self.next_at))
+
+    def begin(self, state, now):
+        """The next run: start the first time, refresh after."""
+        verb = 'refresh' if self.runs else 'start'
+        self.runs += 1
+        self.next_at = time.monotonic() + SURICATA_EVERY
+        self.path = os.path.join(self.work, 'suricata-%d.out' % self.runs)
+        try:
+            with open(self.path, 'w') as out:
+                self.proc = subprocess.Popen([self.script, verb], stdin=subprocess.DEVNULL, stdout=out,
+                                             stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.proc = None
+            self._remove()
+            state.fail('the Suricata rules of the Rules tab could not be looked at: %s could not be run: %s'
+                       % (self.script, error), now)
+            return
+        self.started = time.monotonic()
+
+    def poll(self, state, now):
+        """The run over: what it could not do said. True while one runs."""
+        if self.proc is None:
+            return False
+        if self.proc.poll() is None:
+            if time.monotonic() - self.started <= SURICATA_TIMEOUT:
+                return True
+            self.proc.kill()
+            self.proc.wait()
+            state.fail('the Suricata rules of the Rules tab: suricata_rules.py took longer than %d s, stopped'
+                       % SURICATA_TIMEOUT, now)
+        else:
+            try:
+                with open(self.path, encoding='utf-8') as handle:
+                    answer = json.load(handle)
+            except (OSError, ValueError):
+                answer = None
+            if not isinstance(answer, dict):
+                state.fail('the Suricata rules of the Rules tab: suricata_rules.py said nothing that could be read', now)
+            else:
+                for problem in answer.get('errors') or []:
+                    state.fail('the Suricata rules of the Rules tab: %s' % problem, now)
+        self.proc = None
+        self._remove()
+        return False
+
+    def finish(self, state, now, wait=5.0):
+        """At the service's end: a run going is given `wait` seconds, or stopped."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        self.poll(state, now)
+
+    def _remove(self):
+        if self.path:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
 def count_cut(state, answer, asked, now):
     """cut.py's answer in the state: the connections cut, the pf states killed, those dropped in hardware
     first, the servers it put in their tables and the connections it cut alone, those it left as their
@@ -1040,6 +1167,8 @@ def count_cut(state, answer, asked, now):
     for app, n in (answer.get('apps') or {}).items():
         entry = state.apps.setdefault(str(app), {'category': None, 'named': 0, 'guessed': 0, 'protocols': [], 'last': 0})
         entry['cut'] = entry.get('cut', 0) + number(n)
+    for rule, n in (answer.get('rules') or {}).items():
+        state.rule_cut[str(rule)] = state.rule_cut.get(str(rule), 0) + number(n)
     state.last_cut = {'at': now, 'asked': asked, 'cut': number(answer.get('cut')),
                       'states': number(answer.get('states')), 'tabled': number(answer.get('tabled')),
                       'alone': number(answer.get('alone')),
@@ -1049,11 +1178,11 @@ def count_cut(state, answer, asked, now):
         state.fail('the cut: %s' % problem, now)
 
 
-def reread(state, config, catalogue_path):
+def reread(state, config, catalogue_path, pf=None):
     """The settings read again (SIGHUP): the applications blocked among them - looked at here at once, with
-    the aliases as config.xml has them now - and the installed nDPI's catalogue as aliases.php last wrote
-    it. The interfaces follow at the next window's close. [tables to empty]: those of the applications
-    blocked since (block())."""
+    the aliases as config.xml has them now, and the sources of the block rules read again - and the installed
+    nDPI's catalogue as aliases.php last wrote it. The interfaces follow at the next window's close. [tables
+    to empty]: those of the applications blocked since (block())."""
     conf = tables.settings(config)
     if not conf['read']:
         state.fail('%s could not be read: the settings stay as they were' % config)
@@ -1067,10 +1196,35 @@ def reread(state, config, catalogue_path):
             catalogue = dict(catalogue, protocols={})
         state.catalogue = catalogue
     state.conf = conf
-    _blocked, emptied = block(state, tables.present(config))
+    pf = pf or tables.Pf()
+    aliases = tables.present(config)
+    read_devices(state, config)
+    state.where.refresh(tables.policy(conf, aliases), state.devices, state.network.by_dev, pf)
+    _blocked, emptied = block(state, aliases, pf=pf)
+    say_unread(state)
     trim_cut(state, time.time())
-    log('Application Control: settings read again: %d application(s) blocked' % len(state.blocking))
+    log('Application Control: settings read again: %d application(s) blocked, %d by block rules of the Rules tab'
+        % (len(state.blocking), sum(1 for found in state.policy.values() if found['rules'])))
     return emptied
+
+
+def read_devices(state, config):
+    """The interfaces of config.xml and their devices, read again into the state - the last read kept when config.xml
+    cannot be read now, as the firewall's addresses are (network()): an interface's name is never taken for an
+    alias's for a window."""
+    found = tables.interface_devices(config)
+    if found is not None:
+        state.devices = found
+    return state.devices
+
+
+def say_unread(state, now=None):
+    """An element of a rule's source that cannot be read - an alias pf holds no table for - said once, as the
+    page's last error, while it stays so."""
+    for element in sorted(set(state.where.unread) - state.unread_said):
+        state.fail('part of a block rule\'s source cannot be read, and its devices are not cut: %s'
+                   % state.where.unread[element], now)
+    state.unread_said = set(state.where.unread)
 
 
 def was_blocking(status, conf, aliases):
@@ -1124,8 +1278,9 @@ def save_state(state, captures, status, unknown):
 
 def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
           catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True,
-          ifconfig=IFCONFIG, mount=MOUNT, cut=CUT):
-    """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged)."""
+          ifconfig=IFCONFIG, mount=MOUNT, cut=CUT, suricata=SURICATA):
+    """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged). suricata: the script
+    that keeps the Suricata rules of the Rules tab current (SuricataRules), None for none."""
     global reload_asked
     while True:
         state = start_state(now, reader, config, catalogue_path, refresh, mount, work, status)
@@ -1142,6 +1297,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
     conf, catalogue, watched, start = state.conf, state.catalogue, state.watched, state.since
     pf = pf or tables.Pf()
     cutter = Cutter(work, cut)
+    rules_job = SuricataRules(work, suricata)
 
     def save(captures):
         save_state(state, captures, status, unknown)
@@ -1149,7 +1305,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
     unread = [False]
 
     def look(t):
-        """The firewall's addresses and its internal networks, read again."""
+        """The firewall's addresses and its internal networks, read again; and the sources of the block rules."""
         state.network = network(lan_devices(watched, config), state.network, ifconfig)
         if state.network.read:
             unread[0] = False
@@ -1157,6 +1313,9 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             unread[0] = True
             state.fail('the firewall\'s own addresses could not be read (%s -a): no server goes into a table '
                        'until they are' % ifconfig, t)
+        read_devices(state, config)
+        state.where.refresh(state.policy, state.devices, state.network.by_dev, pf)
+        say_unread(state, t)
 
     problem = ndpi.protocols_problem(catalogue.get('protocols') or {})
     if problem:
@@ -1178,12 +1337,14 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
         if reload_asked:
             # the settings read again, and an application blocked since cut at once from what is remembered
             reload_asked = False
-            for table in reread(state, config, catalogue_path):
+            for table in reread(state, config, catalogue_path, pf):
                 pf.flush(table)
             conf = state.conf
             for problem in pf.errors:
                 state.fail(problem)
             pf.errors = []
+            # a cut under way judges its connections by what is in force now, before its kills
+            cutter.keep_policy(state, now())
             cutter.start(state, now())
             save(captures)
         live = [c for c in captures if c.proc is not None and c.read_in_window < PACKETS_PER_WINDOW]
@@ -1272,12 +1433,16 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                 break
         if not cutter.poll(state, t):
             cutter.start(state, t)
+        # the Suricata rules: written as the service starts, then their sources and names looked at again
+        if not rules_job.poll(state, t) and rules_job.due(state):
+            rules_job.begin(state, t)
     for c in captures:
         c.stop()
     if job is not None:
         job.kill()
         job.remove()
     cutter.finish(state, now())
+    rules_job.finish(state, now())
     state.stopped = now()
     save(captures)
     return state

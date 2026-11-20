@@ -50,7 +50,8 @@ chmod 755 /usr/local/opnsense/scripts/appcontrol/*.py /usr/local/opnsense/script
 chmod 644 /usr/local/opnsense/scripts/appcontrol/categories.json \
     /usr/local/opnsense/scripts/appcontrol/i18n/ui/source.json /usr/local/opnsense/scripts/appcontrol/menu/*.xml
 chmod 644 /usr/local/etc/inc/plugins.inc.d/appcontrol.inc \
-    /usr/local/opnsense/service/conf/actions.d/actions_appcontrol.conf
+    /usr/local/opnsense/service/conf/actions.d/actions_appcontrol.conf \
+    /usr/local/opnsense/service/templates/OPNsense/AppControl/appcontrol.rules
 
 # The page's place in the menu: the XGS section where os-xgs-npu is installed, Firewall where it is
 # not. place-menu.sh writes the menu file and says which it chose: "xgs" or "own".
@@ -65,11 +66,15 @@ rm -f /var/lib/php/tmp/opnsense_menu_cache.xml /var/lib/php/tmp/opnsense_acl_cac
     /tmp/opnsense_menu_cache.xml /tmp/opnsense_acl_cache.json
 
 # What the page's Apply does: the aliases made to say what the settings say, the filter reloaded so
-# pf holds their tables, cron so their Expire runs, then the classifier started - or stopped, when
-# classifying was turned off before.
+# pf holds their tables, cron so their Expire runs, the Suricata rules of the Rules tab written - the
+# Intrusion Detection's rules installed again and Suricata told when they changed - then the classifier
+# started, or stopped when classifying was turned off before.
 configctl appcontrol apply > /dev/null 2>&1 || true
 configctl filter reload skip_alias > /dev/null 2>&1 || true
 configctl cron restart > /dev/null 2>&1 || true
+if configctl appcontrol suricata 2> /dev/null | grep -q '"changed": true'; then
+    configctl ids reload > /dev/null 2>&1 || true
+fi
 if python3 /usr/local/opnsense/scripts/appcontrol/tables.py wanted 2> /dev/null | grep -q '"classify": true'; then
     configctl appcontrol restart > /dev/null 2>&1 || true
     STATE="classifying"

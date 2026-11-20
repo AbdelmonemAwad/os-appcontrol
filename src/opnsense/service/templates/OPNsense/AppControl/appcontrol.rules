@@ -1,0 +1,26 @@
+{#
+ # SPDX-License-Identifier: BSD-2-Clause
+ # Copyright (c) 2026 Abdelmonem Awad <eg2@live.com>
+ #
+ # Application Control's Suricata rules: the rules of its Rules tab, for OPNsense's own Intrusion
+ # Detection. scripts/appcontrol/suricata_rules.py renders this into
+ # /usr/local/etc/suricata/rules/appcontrol.rules, which OPNsense's installRules.py installs beside its own
+ # user rules. configd does not render it, and this folder has no +TARGETS: what the lines match - the
+ # names the installed nDPI knows an application by, the addresses a source holds now in pf and on the
+ # interfaces - is no setting of config.xml's. The script writes each line's matching options (one name in
+ # one place a device writes it, or the application's protocol) and its sid; the shape of a line is here.
+ #
+ #   rules       [{number, action, app, verb (drop or alert), source and destination (Suricata's addresses:
+ #                 never the firewall itself, the destination the internet alone), source_text, msg,
+ #                 lines: [{proto, match, sid}]}]
+ #   threshold   one alert a device a minute for each line; a drop still drops every packet it matches
+ #}
+# Application Control (os-appcontrol): the rules of its Rules tab, written by its page's Apply and kept
+# current by its classifier. Change them there: this file is written again. A change made to one of these lines
+# by its sid on the Intrusion Detection's page stays with that line while its rule stands.
+{% for rule in rules %}
+# rule {{ rule.number }}: {{ rule.action }} {{ rule.app }} from {{ rule.source_text }}
+{% for line in rule.lines %}
+{{ rule.verb }} {{ line.proto }} {{ rule.source }} any -> {{ rule.destination }} any (msg:"{{ rule.msg }}"; flow:to_server; {{ line.match }} {{ threshold }} sid:{{ line.sid }}; rev:1;)
+{% endfor %}
+{% endfor %}

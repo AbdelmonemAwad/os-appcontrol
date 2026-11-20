@@ -10,9 +10,13 @@
  *
  * What is checked: the status script's answer passed on, and one that cannot be read said; the
  * Applications and Unknown grids' rows; and Apply - the aliases, then the filter, cron, the tables of
- * aliases gone and the classifier, in that order; the classifier stopped when classifying is off;
- * nothing after the aliases when they could not be written, but the classifier stopped all the same
- * when classifying is off; nothing at all for a GET.
+ * aliases gone, the Suricata rules of the Rules tab - and ids reload when they changed - and the
+ * classifier, in that order; the classifier stopped when classifying is off; nothing after the aliases
+ * when they could not be written, but the classifier stopped and the Suricata rules taken away all the
+ * same when classifying is off; nothing at all for a GET. And the Rules tab (Api/SettingsController, with
+ * stand-ins for ApiMutableModelControllerBase, config.xml and the Alias model): its grid's rows with what
+ * each rule does now, its action and source as stored; each of its calls on the model's rules.rule; and
+ * the source selector's networks and aliases.
  *
  *   php tools/test-mvc.php
  */
@@ -39,6 +43,31 @@ namespace OPNsense\Base {
             return ['rows' => $records, 'fields' => $fields, 'sort' => $defaultSort];
         }
     }
+
+    /* the model's grid calls, written down; searchBase gives the rows set here, as OPNsense's gives the model's */
+    class ApiMutableModelControllerBase extends ApiControllerBase
+    {
+        public static $rows = [];
+        public static $calls = [];
+        public static $model = null;
+
+        protected function searchBase($path, $fields = null)
+        {
+            self::$calls[] = ['searchBase', $path, $fields];
+            return ['rows' => self::$rows, 'rowCount' => count(self::$rows), 'total' => count(self::$rows), 'current' => 1];
+        }
+
+        protected function getModel()
+        {
+            return self::$model;
+        }
+
+        public function __call($name, $args)
+        {
+            self::$calls[] = array_merge([$name], $args);
+            return ['result' => $name];
+        }
+    }
 }
 
 namespace OPNsense\Core {
@@ -51,6 +80,68 @@ namespace OPNsense\Core {
         {
             self::$asked[] = $event;
             return self::$answers[$event] ?? null;
+        }
+    }
+
+    /* config.xml's interfaces, as OPNsense's Config object gives them: name => node with its descr */
+    class Config
+    {
+        public static $interfaces = [];
+
+        public static function getInstance()
+        {
+            return new self();
+        }
+
+        public function object()
+        {
+            $nodes = [];
+            foreach (self::$interfaces as $name => $descr) {
+                $nodes[$name] = $descr === null ? (object)[] : (object)['descr' => $descr];
+            }
+            return (object)['interfaces' => new class ($nodes) {
+                private $nodes;
+
+                public function __construct($nodes)
+                {
+                    $this->nodes = $nodes;
+                }
+
+                public function children()
+                {
+                    return $this->nodes;
+                }
+            }];
+        }
+    }
+}
+
+namespace OPNsense\Firewall {
+    class Alias
+    {
+        public static $given = [];
+        public $aliases;
+
+        public function __construct()
+        {
+            $items = array_map(function ($a) {
+                return (object)['name' => $a[0], 'type' => $a[1]];
+            }, self::$given);
+            $this->aliases = (object)['alias' => new class ($items) {
+                private $items;
+
+                public function __construct($items)
+                {
+                    $this->items = $items;
+                }
+
+                public function iterateItems()
+                {
+                    foreach ($this->items as $i => $item) {
+                        yield 'uuid-' . $i => $item;
+                    }
+                }
+            }];
         }
     }
 }
@@ -77,9 +168,13 @@ namespace {
     }
 
     require dirname(__DIR__) . '/src/opnsense/mvc/app/controllers/OPNsense/AppControl/Api/ServiceController.php';
+    require dirname(__DIR__) . '/src/opnsense/mvc/app/controllers/OPNsense/AppControl/Api/SettingsController.php';
+    require dirname(__DIR__) . '/src/opnsense/mvc/app/library/OPNsense/AppControl/Rules.php';
 
     use OPNsense\AppControl\Api\ServiceController;
+    use OPNsense\AppControl\Api\SettingsController;
     use OPNsense\AppControl\AppControl;
+    use OPNsense\Base\ApiMutableModelControllerBase;
     use OPNsense\Core\Backend;
 
     $failed = 0;
@@ -137,24 +232,38 @@ namespace {
     check($controller->reconfigureAction() === ['status' => 'failed'] && Backend::$asked === [], 'Apply by GET: refused, nothing asked');
     Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'ok', 'changes' => ['appcontrol_cat_Web: added']]),
         'appcontrol flush' => json_encode(['killed' => ['appcontrol_cat_Gone'], 'errors' => []]),
+        'appcontrol suricata' => json_encode(['status' => 'ok', 'changed' => false, 'lines' => 37, 'errors' => []]),
         'appcontrol release' => json_encode(['released' => 2, 'kept' => 1, 'errors' => []])];
     Backend::$asked = [];
     AppControl::$classify = '1';
     $result = (new ServiceController())->reconfigureAction();
     check(Backend::$asked === ['appcontrol apply', 'filter reload skip_alias', 'cron restart', 'appcontrol flush',
-        'appcontrol reload', 'appcontrol release'], 'Apply, classifying on: the aliases, the filter and its block rules, cron, ' .
-        'the tables of aliases gone, the classifier\'s settings read again (not a restart, which forgets what it remembers), ' .
-        'then what was dropped in hardware for an application no longer blocked handed back');
+        'appcontrol suricata', 'appcontrol reload', 'appcontrol release'], 'Apply, classifying on: the aliases, the filter and ' .
+        'its block rules, cron, the tables of aliases gone, the Suricata rules of the Rules tab - unchanged, so no reload of the ' .
+        'Intrusion Detection - the classifier\'s settings read again (not a restart, which forgets what it remembers), then ' .
+        'what was dropped in hardware for an application no longer blocked handed back');
     check(($result['status'] ?? '') === 'ok' && $result['classify'] === true && $result['changes'] === ['appcontrol_cat_Web: added'],
         'Apply: what changed passed on to the page');
     check(($result['gone_tables']['killed'] ?? null) === ['appcontrol_cat_Gone'],
         'Apply: the tables of aliases gone, taken out of pf, passed on to the page');
     check(($result['released']['released'] ?? null) === 2, 'Apply: how many were handed back from hardware, passed on to the page');
-    AppControl::$classify = '0';
+    check(($result['suricata']['lines'] ?? null) === 37, 'Apply: what the Suricata rules came to, passed on to the page');
+    Backend::$answers['appcontrol suricata'] = json_encode(['status' => 'ok', 'changed' => true, 'lines' => 38]);
     Backend::$asked = [];
     (new ServiceController())->reconfigureAction();
-    check(array_slice(Backend::$asked, -2) === ['appcontrol stop', 'appcontrol release'],
-        'Apply, classifying off: the classifier stopped, then everything dropped in hardware handed back - no alias, nothing blocked');
+    check(array_slice(Backend::$asked, 4, 2) === ['appcontrol suricata', 'ids reload'],
+        'Apply, the Suricata rules changed: the Intrusion Detection\'s rules installed again and Suricata told (ids reload)');
+    Backend::$answers['appcontrol suricata'] = 'not json';
+    $result = (new ServiceController())->reconfigureAction();
+    check($result['suricata'] === ['status' => 'failed', 'changed' => false, 'errors' => ['No answer could be read.']],
+        'Apply, the Suricata rules\' answer not to be read: said, no reload');
+    AppControl::$classify = '0';
+    Backend::$answers['appcontrol suricata'] = json_encode(['status' => 'ok', 'changed' => true, 'lines' => 0]);
+    Backend::$asked = [];
+    (new ServiceController())->reconfigureAction();
+    check(array_slice(Backend::$asked, -4) === ['appcontrol suricata', 'ids reload', 'appcontrol stop', 'appcontrol release'],
+        'Apply, classifying off: the Suricata rules taken away, the classifier stopped, then everything dropped in hardware ' .
+        'handed back - no alias, nothing blocked');
     AppControl::$classify = '1';
     Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'failed', 'errors' => ['refused']])];
     Backend::$asked = [];
@@ -167,17 +276,84 @@ namespace {
     check(Backend::$asked === ['appcontrol apply'] && $result['status'] === 'failed',
         'Apply, classifying on, no answer: failed, nothing more done');
     AppControl::$classify = '0';
-    Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'failed', 'errors' => ['refused']])];
+    Backend::$answers = ['appcontrol apply' => json_encode(['status' => 'failed', 'errors' => ['refused']]),
+        'appcontrol suricata' => json_encode(['status' => 'ok', 'changed' => true])];
     Backend::$asked = [];
     $result = (new ServiceController())->reconfigureAction();
-    check(Backend::$asked === ['appcontrol apply', 'appcontrol stop'] && $result['errors'] === ['refused'] &&
-        $result['classify'] === false, 'Apply, classifying off, the aliases not written: the classifier stopped all the same, ' .
-        'the reason passed on');
+    check(Backend::$asked === ['appcontrol apply', 'appcontrol stop', 'appcontrol suricata', 'ids reload'] &&
+        $result['errors'] === ['refused'] && $result['classify'] === false, 'Apply, classifying off, the aliases not written: ' .
+        'the classifier stopped and the Suricata rules taken away all the same, the reason passed on');
     Backend::$answers = [];
     Backend::$asked = [];
     $result = (new ServiceController())->reconfigureAction();
-    check(Backend::$asked === ['appcontrol apply', 'appcontrol stop'] && $result['status'] === 'failed',
+    check(Backend::$asked === ['appcontrol apply', 'appcontrol stop', 'appcontrol suricata'] && $result['status'] === 'failed',
         'Apply, classifying off, no answer: failed, the classifier stopped all the same');
+
+    /* the Rules tab: what each rule does now */
+    Backend::$answers = ['appcontrol rules' => json_encode(['rules' => ['u1' => ['state' => 'active']], 'ids' => ['enabled' => true]])];
+    check((new ServiceController())->rulesAction() === ['rules' => ['u1' => ['state' => 'active']], 'ids' => ['enabled' => true]],
+        'the Rules tab\'s state: status.py rules\' answer passed on');
+
+    /* the Rules tab's grid and its calls on the model */
+    ApiMutableModelControllerBase::$rows = [
+        ['uuid' => 'u1', 'enabled' => '1', 'action' => 'Block', 'source' => 'GUEST net', 'source_not' => '0', 'app' => 'YouTube',
+            'description' => 'guests'],
+        ['uuid' => 'u2', 'enabled' => '1', 'action' => 'Alert', 'source' => 'any', 'source_not' => '0', 'app' => 'SSH',
+            'description' => ''],
+    ];
+    ApiMutableModelControllerBase::$model = (object)['rules' => (object)['rule' => new class {
+        public function iterateItems()
+        {
+            yield 'u1' => (object)['action' => 'block', 'source' => 'opt2'];
+            yield 'u2' => (object)['action' => 'alert', 'source' => 'any'];
+        }
+    }]];
+    Backend::$answers = ['appcontrol rules' => json_encode(['rules' => [
+        'u1' => ['state' => 'active', 'cut' => 4, 'suricata' => ['lines' => 36, 'reason' => null, 'refused' => 2,
+            'refused_by' => 'E: detect-parse: why']],
+        'u2' => ['state' => 'pending', 'cut' => 0, 'suricata' => ['lines' => 0, 'reason' => 'no_match']]]])];
+    ApiMutableModelControllerBase::$calls = [];
+    $grid = (new SettingsController())->searchRuleAction();
+    check(ApiMutableModelControllerBase::$calls[0] === ['searchBase', 'rules.rule', ['enabled', 'action', 'source', 'source_not',
+        'app', 'description']], 'the Rules grid: the model\'s rules.rule, its columns');
+    check(array_map(function ($r) {
+        return [$r['uuid'], $r['action_key'], $r['source_key'], $r['state'], $r['cut'], $r['suricata_lines'], $r['suricata_reason'],
+            $r['suricata_refused'], $r['suricata_refused_by']];
+    }, $grid['rows']) === [['u1', 'block', 'opt2', 'active', 4, 36, '', 2, 'E: detect-parse: why'],
+        ['u2', 'alert', 'any', 'pending', 0, 0, 'no_match', 0, '']],
+        'the Rules grid: each rule\'s action and source as stored, its state, the connections cut for it, its Suricata lines or ' .
+        'why none, and those Suricata\'s own test refused, with what it said');
+    Backend::$answers = [];
+    $grid = (new SettingsController())->searchRuleAction();
+    check($grid['rows'][0]['state'] === '' && $grid['rows'][0]['cut'] === 0 && $grid['rows'][0]['suricata_reason'] === '',
+        'the Rules grid, what the rules do now not to be read: the rules listed all the same, nothing said of them');
+    ApiMutableModelControllerBase::$calls = [];
+    $settings = new SettingsController();
+    $settings->getRuleAction('u1');
+    $settings->addRuleAction();
+    $settings->setRuleAction('u1');
+    $settings->delRuleAction('u1');
+    $settings->toggleRuleAction('u1', '0');
+    check(ApiMutableModelControllerBase::$calls === [['getBase', 'rule', 'rules.rule', 'u1'], ['addBase', 'rule', 'rules.rule'],
+        ['setBase', 'rule', 'rules.rule', 'u1'], ['delBase', 'rules.rule', 'u1'], ['toggleBase', 'rules.rule', 'u1', '0']],
+        'the Rules grid\'s calls: get, add, set, del and toggle, each on rules.rule, as the dialog posts it under "rule"');
+
+    /* the source selector */
+    \OPNsense\Core\Config::$interfaces = ['wan' => 'WAN', 'lan' => 'LAN', 'opt2' => 'GUEST', 'opt3' => null, 'opt4' => 'R&D <lab>'];
+    $escaped = (new SettingsController())->listNetworkSelectOptionsAction()['networks']['items']['opt4'] ?? null;
+    check($escaped === 'R&amp;D &lt;lab&gt; network', 'the source selector: an interface\'s description in its label escaped, ' .
+        'as OPNsense\'s own selector options are - the selector writes them as markup');
+    \OPNsense\Core\Config::$interfaces = ['wan' => 'WAN', 'lan' => 'LAN', 'opt2' => 'GUEST', 'opt3' => null];
+    \OPNsense\Firewall\Alias::$given = [['Teachers', 'host'], ['web_ports', 'port'], ['appcontrol_YouTube', 'external'],
+        ['Countries', 'geoip'], ['__lan_network', 'internal']];
+    $options = (new SettingsController())->listNetworkSelectOptionsAction();
+    check($options === [
+        'single' => ['label' => 'Single host or Network'],
+        'aliases' => ['label' => 'Aliases', 'items' => ['Countries' => 'Countries', 'Teachers' => 'Teachers']],
+        'networks' => ['label' => 'Networks', 'items' => ['any' => 'any', 'opt2' => 'GUEST network', 'lan' => 'LAN network',
+            'opt3' => 'OPT3 network', 'wan' => 'WAN network']],
+    ], 'the source selector: an address by hand; any and each interface\'s network, by its description; the aliases of ' .
+        'addresses - not those of ports, OPNsense\'s internal ones, nor this plugin\'s tables of servers; not the firewall itself');
 
     echo $failed ? "$failed of $checks checks failed\n" : "$checks checks passed\n";
     exit($failed ? 1 : 0);

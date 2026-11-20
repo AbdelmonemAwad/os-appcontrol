@@ -5,9 +5,10 @@
 #
 # Remove the Application Control plugin: the classifier stopped, its aliases taken out of
 # Firewall: Aliases - switched off instead where a rule or a setting still names one - so its block
-# rules go at the filter reload, what it dropped in hardware handed back, its files, its state in
-# /var/db/os-appcontrol, and the addresses its tables held. Kept: the settings in config.xml, and the
-# package ndpi unless install/install.sh installed it and no other package needs it.
+# rules go at the filter reload, what it dropped in hardware handed back, its Suricata rules taken out
+# of the Intrusion Detection's, its files, its state in /var/db/os-appcontrol, and the addresses its
+# tables held. Kept: the settings in config.xml, and the package ndpi unless install/install.sh
+# installed it and no other package needs it.
 
 # the classifier and its aliases first, while the files that stop and remove them are there
 /usr/local/etc/rc.d/appcontrol onestop > /dev/null 2>&1 || true
@@ -19,6 +20,15 @@ configctl appcontrol remove > /dev/null 2>&1 || true
 # with no alias of the plugin's switched on, no application is blocked: every connection a cut dropped on
 # the coprocessor is handed back to the host (os-xgs-npu's hwdrop.py; nothing to do without it)
 configctl appcontrol release > /dev/null 2>&1 || true
+# the Suricata rules of the Rules tab taken out of the Intrusion Detection's local rules; its rules
+# installed again without them, and Suricata told when it runs (ids reload)
+# installed, the file is in opnsense.rules/ too: with it alone there - a reload that failed before, configd busy -
+# the reload is asked for all the same, which takes it out
+if [ -f /usr/local/etc/suricata/rules/appcontrol.rules ] || [ -f /usr/local/etc/suricata/opnsense.rules/appcontrol.rules ]; then
+    rm -f /usr/local/etc/suricata/rules/appcontrol.rules /usr/local/etc/suricata/rules/appcontrol.rules.new \
+        /usr/local/etc/suricata/rules/.appcontrol.rules.*.new
+    configctl ids reload > /dev/null 2>&1 || true
+fi
 
 NDPI=
 [ -f /usr/local/share/os-appcontrol/ndpi-installed ] && NDPI=ours
@@ -28,6 +38,7 @@ rm -f /usr/local/etc/inc/plugins.inc.d/appcontrol.inc
 rm -f /usr/local/etc/rc.d/appcontrol
 rm -rf /usr/local/share/os-appcontrol
 rm -f /usr/local/opnsense/service/conf/actions.d/actions_appcontrol.conf
+rm -rf /usr/local/opnsense/service/templates/OPNsense/AppControl
 rm -rf /usr/local/opnsense/scripts/appcontrol
 # the menu file place-menu.sh wrote, which is not one of src/'s files
 rm -f /usr/local/opnsense/mvc/app/models/OPNsense/AppControl/Menu/Menu.xml

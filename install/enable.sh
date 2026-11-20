@@ -28,5 +28,9 @@ echo "classification turned on\n";
 configctl appcontrol apply > /dev/null 2>&1
 configctl filter reload skip_alias > /dev/null 2>&1
 configctl cron restart > /dev/null 2>&1
+# the Suricata rules of the Rules tab, as the page's Apply writes them
+if configctl appcontrol suricata 2> /dev/null | grep -q '"changed": true'; then
+    configctl ids reload > /dev/null 2>&1
+fi
 configctl appcontrol restart > /dev/null 2>&1
 exit 0

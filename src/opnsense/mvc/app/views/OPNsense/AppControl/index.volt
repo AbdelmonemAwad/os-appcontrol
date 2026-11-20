@@ -4,7 +4,8 @@
  #
  # Firewall: Application Control (XGS: Application Control when os-xgs-npu is installed) - which
  # application each connection belongs to, by nDPI, the tables of servers that follow from it, the
- # applications blocked, and the connections nDPI did not name.
+ # applications blocked, the rules acting on an application from a source - in pf, in hardware and in
+ # Suricata - and the connections nDPI did not name.
  #}
 
 <style>
@@ -27,9 +28,10 @@
        the difference; wide screens never need to scroll it sideways. */
     @media (min-width: 768px) {
         #grid-apps .tabulator-tableholder, #grid-categories .tabulator-tableholder,
-        #grid-unknown .tabulator-tableholder { overflow-x: hidden; }
+        #grid-unknown .tabulator-tableholder, #grid-rules .tabulator-tableholder { overflow-x: hidden; }
     }
     .ac-note { padding: 0 15px 10px; }
+    .ac-apply { padding: 0 15px 15px; }
 </style>
 
 <script>
@@ -237,25 +239,34 @@
             const blocking = data.blocking || {};
             const blocked = Array.isArray(blocking.apps) ? blocking.apps : [];
             const pending = Array.isArray(blocking.pending) ? blocking.pending : [];
+            const by_rules = Number(blocking.rules) || 0;
+            const any_block = blocked.length > 0 || by_rules > 0;
             const hardware = blocking.hardware || null;
             const usable = !!(hardware && !hardware.too_old);
             let said = '';
-            if (blocked.length) {
-                said = "{{ lang._('Blocked:') }}" + ' ' + blocked.join(', ') + ' · ' + count(blocking.cut) + ' ' +
-                    "{{ lang._('connections cut') }}";
-                if (usable) {
-                    said += ' · ' + count(blocking.dropped) + ' ' + "{{ lang._('dropped in hardware first') }}";
+            if (any_block) {
+                const parts = [];
+                if (blocked.length) {
+                    parts.push("{{ lang._('Blocked:') }}" + ' ' + blocked.join(', '));
                 }
-                said += ' · ' + count(blocking.packets) + ' ' + "{{ lang._('packets stopped since the rules were last loaded') }}" + '.';
+                if (by_rules) {
+                    parts.push(count(by_rules) + ' ' + "{{ lang._('block rules of the Rules tab') }}");
+                }
+                parts.push(count(blocking.cut) + ' ' + "{{ lang._('connections cut') }}");
+                if (usable) {
+                    parts.push(count(blocking.dropped) + ' ' + "{{ lang._('dropped in hardware first') }}");
+                }
+                parts.push(count(blocking.packets) + ' ' + "{{ lang._('packets stopped since the rules were last loaded') }}");
+                said = parts.join(' · ') + '.';
             }
             if (pending.length) {
                 said += (said ? ' ' : '') + "{{ lang._('Chosen to be blocked, not applied yet:') }}" + ' ' +
                     pending.join(', ') + '.';
             }
             $('#ac-blocking').text(plain(said));
-            $('#ac-hw-on').toggle(!!(blocked.length && usable && hardware.cut_in_hardware));
-            $('#ac-hw-off').toggle(!!(blocked.length && usable && !hardware.cut_in_hardware));
-            $('#ac-hw-old').toggle(!!(blocked.length && hardware && hardware.too_old));
+            $('#ac-hw-on').toggle(!!(any_block && usable && hardware.cut_in_hardware));
+            $('#ac-hw-off').toggle(!!(any_block && usable && !hardware.cut_in_hardware));
+            $('#ac-hw-old').toggle(!!(any_block && hardware && hardware.too_old));
             $('#ac-blocking-line').toggle(said !== '');
             $('#ac-capped').text(plain(count(data.capped_windows) + ' ' +
                 "{{ lang._('windows cut short: connections past the packets, connections or bytes a window reads were not classified') }}"))
@@ -286,7 +297,7 @@
                         return when(row[column.id]);
                     },
                     table: function (column, row) {
-                        if (!row.chosen && !row.blocked && !row.block_pending) {
+                        if (!row.chosen && !row.blocked && !row.block_pending && !row.ruled) {
                             return '<span class="text-muted">-</span>';
                         }
                         if (!row.table) {
@@ -294,10 +305,13 @@
                         }
                         return '<code>' + row.table + '</code> ' + count(row.entries);
                     },
-                    /* blocked: the connections cut, and the packets its block rule stopped */
+                    /* blocked - for every device, or by block rules of the Rules tab: the connections cut, and the
+                       packets its block rules stopped */
                     blocked: function (column, row) {
-                        if (row.blocked) {
-                            return '<span class="text-danger"><i class="fa fa-ban"></i> ' + "{{ lang._('blocked') }}" +
+                        if (row.blocked || row.rules > 0) {
+                            const what = row.blocked ? "{{ lang._('blocked') }}" :
+                                "{{ lang._('blocked by rules:') }}" + ' ' + count(row.rules);
+                            return '<span class="text-danger"><i class="fa fa-ban"></i> ' + what +
                                 '</span> · ' + count(row.cut) + ' ' + "{{ lang._('connections cut') }}" + ' · ' +
                                 count(row.packets) + ' ' + "{{ lang._('packets stopped') }}";
                         }
@@ -355,6 +369,166 @@
             }
         });
 
+        /*
+         * The Rules tab: each rule - its action, its source, an interface's network by the interface's name - and
+         * what it does now, against what the last Apply put in force: acting, changed and not applied yet,
+         * switched off, acting on no device as its source cannot be read or holds none; the connections cut for
+         * it; its Suricata lines, or why it has none. Under it, the Intrusion Detection's state, which decides what
+         * a Suricata rule does, and the rules deleted that act until Apply.
+         */
+        const actions = {'block': "{{ lang._('Block') }}", 'alert': "{{ lang._('Alert') }}"};
+        const rule_states = {
+            'active': "{{ lang._('in force') }}",
+            'changed': "{{ lang._('changed, not applied yet') }}",
+            'pending': "{{ lang._('not applied yet') }}",
+            'disabled': "{{ lang._('switched off') }}",
+            'off': "{{ lang._('classifying is off') }}",
+            'unknown_app': "{{ lang._('an application the installed nDPI does not know') }}",
+            'unread': "{{ lang._('its source cannot be read now: it acts on no device') }}",
+            'empty': "{{ lang._('its source holds no device\'s address now: it acts on none') }}"
+        };
+        const suricata_reasons = {
+            'no_match': "{{ lang._('no Suricata rule: Suricata cannot tell this application') }}",
+            'unread': "{{ lang._('no Suricata rule: its source could not be read') }}",
+            'empty': "{{ lang._('no Suricata rule: its source holds no address now') }}",
+            'too_long': "{{ lang._('no Suricata rule: its source is too long for one') }}",
+            'too_many': "{{ lang._('no Suricata rule: it would take more than 9,999 lines') }}",
+            'refused': "{{ lang._('no Suricata rule: Suricata refused its lines') }}"
+        };
+        const network_names = {};
+
+        function esc(value) {
+            return $('<div/>').text(value === null || value === undefined ? '' : String(value)).html();
+        }
+
+        $('#grid-rules').UIBootgrid({
+            search: '/api/appcontrol/settings/search_rule',
+            get: '/api/appcontrol/settings/get_rule/',
+            set: '/api/appcontrol/settings/set_rule/',
+            add: '/api/appcontrol/settings/add_rule/',
+            del: '/api/appcontrol/settings/del_rule/',
+            toggle: '/api/appcontrol/settings/toggle_rule/',
+            options: {
+                formatters: {
+                    action: function (column, row) {
+                        return esc(actions[row.action_key] || row.action);
+                    },
+                    source: function (column, row) {
+                        const items = String(row.source_key || '').split(',').filter(function (item) {
+                            return item !== '';
+                        });
+                        const names = items.map(function (item) {
+                            return network_names[item] || item;
+                        });
+                        return (row.source_not === '1' ? '! ' : '') + esc(names.join(', '));
+                    },
+                    state: function (column, row) {
+                        const parts = [esc(rule_states[row.state] || '-')];
+                        if (row.state === 'changed') {
+                            /* what it says of Suricata and the cut is what the last Apply put in force, not this */
+                            return parts[0];
+                        }
+                        if (row.state === 'active' && row.action_key === 'block') {
+                            parts.push(count(row.cut) + ' ' + "{{ lang._('connections cut') }}");
+                        }
+                        if (row.suricata_lines > 0) {
+                            parts.push(count(row.suricata_lines) + ' ' + "{{ lang._('Suricata rules') }}");
+                        } else if (suricata_reasons[row.suricata_reason]) {
+                            parts.push(suricata_reasons[row.suricata_reason]);
+                        }
+                        if (row.suricata_refused > 0) {
+                            /* the lines Suricata's own test refused, kept out of the file; what it said, on hover */
+                            parts.push('<span class="text-warning" title="' + esc(row.suricata_refused_by) + '">' +
+                                count(row.suricata_refused) + ' ' + "{{ lang._('refused by Suricata') }}" + '</span>');
+                        }
+                        return parts.join(' · ');
+                    }
+                }
+            }
+        }).on('loaded.rs.jquery.bootgrid', function () {
+            /* a rule added, changed or deleted: the line of the rules deleted since the last Apply with it */
+            rules_state();
+        });
+
+        /* what the Intrusion Detection does with the Suricata rules of the Rules tab, on which interfaces - and
+           whether one of them is internal, where Suricata sees a device's own address; and the rules deleted since
+           the last Apply, which act until the next */
+        function draw_ids(data) {
+            const ids = data && data.ids ? data.ids : null;
+            const names = ids && Array.isArray(ids.names) && ids.names.length ? ids.names.join(', ') : '-';
+            let text = '';
+            if (ids && !ids.enabled) {
+                text = plain("{{ lang._('Intrusion Detection is off: the Suricata rules of the Rules tab wait for it.') }}");
+            } else if (ids && !ids.running) {
+                text = plain("{{ lang._('Intrusion Detection is on, but Suricata is not running.') }}");
+            } else if (ids && ids.mode === 'ips') {
+                text = plain("{{ lang._('Intrusion Detection runs in IPS mode on %s: the Suricata rule of a Block rule drops what it matches, and alerts.') }}").replace('%s', names);
+            } else if (ids) {
+                text = plain("{{ lang._('Intrusion Detection runs in IDS mode on %s: the Suricata rules alert, and drop nothing.') }}").replace('%s', names);
+            }
+            if (ids && ids.enabled && Array.isArray(ids.interfaces) && ids.interfaces.length &&
+                    !(Array.isArray(ids.internal) && ids.internal.length)) {
+                text += ' ' + plain("{{ lang._('None of them is an internal interface: after NAT, Suricata sees no device\'s own IPv4 address there.') }}");
+            }
+            /* Suricata's own test of the rules file, failing without naming a line: what it said */
+            const engine = data && data.suricata && data.suricata.engine ? data.suricata.engine : null;
+            if (engine && engine.state === 'failed') {
+                text += (text ? ' ' : '') + plain("{{ lang._('Suricata\'s own test of the rules of the Rules tab failed: %s') }}")
+                    .replace('%s', String(engine.message || '-'));
+            }
+            $('#ac-ids').text(text).toggle(text !== '');
+            const gone = data && Number(data.gone) > 0 ? Number(data.gone) : 0;
+            $('#ac-rules-gone').text(plain("{{ lang._('Rules deleted since the last Apply, which act until Apply: %s') }}").replace('%s', count(gone)))
+                .toggle(gone > 0);
+        }
+
+        function rules_state() {
+            ajaxGet('/api/appcontrol/service/rules', {}, draw_ids);
+        }
+
+        /* the rule dialog's source: OPNsense's own selector of networks and aliases, with an address written by hand;
+           its labels come escaped, as OPNsense's own, and are made plain for the grid, which escapes what it writes */
+        ajaxGet('/api/appcontrol/settings/list_network_select_options', {}, function (data) {
+            if (!data || !data.single) {
+                return;
+            }
+            $.each((data.networks || {}).items || {}, function (key, label) {
+                network_names[key] = plain(label);
+            });
+            $('.net_selector').each(function () {
+                $(this).replaceInputWithSelector(data, $(this).hasClass('net_selector_multi'));
+                /* as OPNsense's own rule page has it (filter_rule.volt): "Single host or Network" and "any" stay alone -
+                   the model takes either only by itself */
+                if ($(this).hasClass('net_selector_multi')) {
+                    $("select[for='" + $(this).attr('id') + "']").on('shown.bs.select', function () {
+                        $(this).data('previousValue', $(this).val());
+                    }).change(function () {
+                        const prev = Array.isArray($(this).data('previousValue')) ? $(this).data('previousValue') : [];
+                        const is_single = $(this).val().includes('') || $(this).val().includes('any');
+                        const was_single = prev.includes('') || prev.includes('any');
+                        let refresh = false;
+                        if (was_single && is_single && $(this).val().length > 1) {
+                            $(this).val($(this).val().filter(value => !prev.includes(value)));
+                            refresh = true;
+                        } else if (is_single && $(this).val().length > 1) {
+                            if ($(this).val().includes('any') && !prev.includes('any')) {
+                                $(this).val('any');
+                            } else {
+                                $(this).val('');
+                            }
+                            refresh = true;
+                        }
+                        if (refresh) {
+                            $(this).selectpicker('refresh');
+                            $(this).trigger('change');
+                        }
+                        $(this).data('previousValue', $(this).val());
+                    });
+                }
+            });
+            $('#grid-rules').bootgrid('reload');
+        });
+
         /* the cards, and the grids of the tab on screen */
         $('#refreshAct').click(function () {
             refresh();
@@ -362,6 +536,9 @@
             if (tab === '#applications') {
                 $('#grid-apps').bootgrid('reload');
                 $('#grid-categories').bootgrid('reload');
+            } else if (tab === '#rules') {
+                $('#grid-rules').bootgrid('reload');
+                rules_state();
             } else if (tab === '#unknown') {
                 $('#grid-unknown').bootgrid('reload');
             }
@@ -371,7 +548,37 @@
             $('.selectpicker').selectpicker('refresh');
         });
 
-        /* Apply: the settings saved, then the aliases, the filter, cron and the classifier (reconfigure) */
+        /* Apply's answer, one line: what changed, what failed, what was handed back from hardware and what the
+           hand-back could not do - kept for the next Apply - and the Suricata rules written or taken away; with none
+           of these, idle: the Settings tab's says no alias changed, the Rules tab's that its rules were applied */
+        function show_result(target, data, idle) {
+            const lines = (data && data.changes ? data.changes : []).concat(data && data.errors ? data.errors : []);
+            const released = data && data.released ? data.released.released : null;
+            if (typeof released === 'number' && released > 0) {
+                lines.push(count(released) + ' ' + "{{ lang._('connections handed back from hardware') }}");
+            }
+            const late = data && data.released && Array.isArray(data.released.errors) ? data.released.errors : [];
+            const suricata = data && data.suricata ? data.suricata : null;
+            const not_written = suricata && Array.isArray(suricata.errors) ? suricata.errors : [];
+            $.each(late.concat(not_written), function (i, problem) {
+                lines.push(String(problem));
+            });
+            if (suricata && suricata.changed) {
+                lines.push(suricata.lines > 0 ? count(suricata.lines) + ' ' + "{{ lang._('Suricata rules written for the Rules tab') }}"
+                    : "{{ lang._('The Suricata rules of the Rules tab taken away.') }}");
+            }
+            $(target).attr('class', data && data.status === 'ok' ? (late.length || not_written.length ? 'alert alert-warning' : 'text-muted')
+                : 'alert alert-danger')
+                .text(plain(lines.length ? lines.join(' · ') : idle)).show();
+            refresh();
+            $('#grid-apps').bootgrid('reload');
+            $('#grid-categories').bootgrid('reload');
+            $('#grid-rules').bootgrid('reload');
+            rules_state();
+        }
+
+        /* Apply: the settings saved, then the aliases, the filter, cron, the Suricata rules and the classifier
+           (reconfigure) */
         $('#applyAct').click(function () {
             const $button = $(this).prop('disabled', true);
             const $progress = $('#frm_general_progress').addClass('fa fa-spinner fa-pulse');
@@ -382,29 +589,26 @@
             saveFormToEndpoint('/api/appcontrol/settings/set', 'frm_general', function () {
                 ajaxCall('/api/appcontrol/service/reconfigure', {}, function (data) {
                     done();
-                    const lines = (data && data.changes ? data.changes : []).concat(data && data.errors ? data.errors : []);
-                    const released = data && data.released ? data.released.released : null;
-                    if (typeof released === 'number' && released > 0) {
-                        lines.push(count(released) + ' ' + "{{ lang._('connections handed back from hardware') }}");
-                    }
-                    /* what the hand-back could not do - kept for the next Apply - said, not left out */
-                    const late = data && data.released && Array.isArray(data.released.errors) ? data.released.errors : [];
-                    $.each(late, function (i, problem) {
-                        lines.push(String(problem));
-                    });
-                    $('#ac-result').attr('class', data && data.status === 'ok' ? (late.length ? 'alert alert-warning' : 'text-muted')
-                        : 'alert alert-danger')
-                        .text(plain(lines.length ? lines.join(' · ') : "{{ lang._('Nothing to change in aliases.') }}")).show();
-                    refresh();
-                    $('#grid-apps').bootgrid('reload');
-                    $('#grid-categories').bootgrid('reload');
+                    show_result('#ac-result', data, "{{ lang._('Nothing to change in aliases.') }}");
                 });
             }, false, done);
+        });
+
+        /* the Rules tab's Apply: the rules are saved as they are edited; this puts them into the firewall */
+        $('#applyRulesAct').click(function () {
+            const $button = $(this).prop('disabled', true);
+            const $progress = $('#rules_progress').addClass('fa fa-spinner fa-pulse');
+            ajaxCall('/api/appcontrol/service/reconfigure', {}, function (data) {
+                $progress.removeClass('fa fa-spinner fa-pulse');
+                $button.prop('disabled', false);
+                show_result('#ac-rules-result', data, "{{ lang._('The changes have been applied successfully.') }}");
+            });
         });
 
         cards_wait('#ac-cards', ["{{ lang._('Applications') }}", "{{ lang._('Classified') }}", "{{ lang._('Unknown') }}",
             "{{ lang._('Last error') }}"]);
         refresh();
+        rules_state();
         keep_tab();
     });
 </script>
@@ -426,6 +630,7 @@
 
 <ul class="nav nav-tabs" data-tabs="tabs" id="maintabs">
     <li class="active"><a data-toggle="tab" href="#applications">{{ lang._('Applications') }}</a></li>
+    <li><a data-toggle="tab" href="#rules">{{ lang._('Rules') }}</a></li>
     <li><a data-toggle="tab" href="#unknown">{{ lang._('Unknown') }}</a></li>
     <li><a data-toggle="tab" href="#settings">{{ lang._('Settings') }}</a></li>
 </ul>
@@ -468,6 +673,47 @@
             {{ lang._('Each table is an External alias in Firewall: Aliases, for a rule\'s source or destination: servers nDPI named, each kept until unseen for the address expiry. The table of an application chosen in Blocked applications has a block rule of this plugin\'s as well, and takes a server only when the firewall\'s own resolver gives that address for the name its connection carried.') }}
         </div>
     </div>
+    <div id="rules" class="tab-pane">
+        <table id="grid-rules" class="table table-condensed table-hover table-striped table-responsive" data-editDialog="DialogRule" data-editAlert="ruleChangeMessage">
+            <thead>
+                <tr>
+                    <th data-column-id="uuid" data-type="string" data-identifier="true" data-visible="false">{{ lang._('ID') }}</th>
+                    <th data-column-id="enabled" data-type="string" data-formatter="rowtoggle" data-width="6em">{{ lang._('Enabled') }}</th>
+                    <th data-column-id="action" data-type="string" data-formatter="action" data-width="7em">{{ lang._('Action') }}</th>
+                    <th data-column-id="source" data-type="string" data-formatter="source">{{ lang._('Source') }}</th>
+                    <th data-column-id="app" data-type="string">{{ lang._('Application') }}</th>
+                    <th data-column-id="description" data-type="string">{{ lang._('Description') }}</th>
+                    <th data-column-id="state" data-type="string" data-formatter="state" data-sortable="false">{{ lang._('State') }}</th>
+                    <th data-column-id="commands" data-formatter="commands" data-sortable="false" data-width="7em">{{ lang._('Commands') }}</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+            <tfoot>
+                <tr>
+                    <td></td>
+                    <td>
+                        <button data-action="add" type="button" class="btn btn-xs btn-primary"><span class="fa fa-plus fa-fw"></span></button>
+                        <button data-action="deleteSelected" type="button" class="btn btn-xs btn-default"><span class="fa fa-trash-o fa-fw"></span></button>
+                    </td>
+                </tr>
+            </tfoot>
+        </table>
+        <div class="text-muted ac-note">
+            {{ lang._('Each rule acts on its application for the devices of its source. Block: a block rule of this plugin\'s on the application\'s table, from that source alone and ahead of the rules of Firewall: Rules; the connections nDPI names as the application from there cut, in hardware too where os-xgs-npu is installed; and a Suricata rule. Alert: a Suricata rule alone, which alerts. Every device but those of a source: invert it - a block for all but one device, say.') }}
+            {{ lang._('The Suricata rules go to the Intrusion Detection\'s own local rules: one for each name the installed nDPI knows the application by - in the server name of TLS and QUIC, the Host of HTTP and the name a DNS question asks for - and one for its protocol when Suricata reads that protocol itself. Each takes a device\'s connection to the internet alone, never one to the firewall itself or to its own networks, and follows its source as it changes, within five minutes; Suricata tests each new file first, and a line it refuses is kept out and said here. Suricata sees a device\'s own address on an internal interface it reads, before NAT; its alerts are in Services: Intrusion Detection.') }}
+            <span id="ac-ids" style="display: none;"></span>
+            <span id="ac-rules-gone" class="text-warning" style="display: none;"></span>
+        </div>
+        <div class="ac-note">
+            <div id="ruleChangeMessage" class="alert alert-info" style="display: none" role="alert">
+                {{ lang._('After changing settings, please remember to apply them with the button below') }}
+            </div>
+        </div>
+        <div class="ac-apply">
+            <button class="btn btn-primary" id="applyRulesAct" type="button"><b>{{ lang._('Apply') }}</b> <i id="rules_progress"></i></button>
+            <div style="padding-top: 10px;"><div id="ac-rules-result" style="display: none;"></div></div>
+        </div>
+    </div>
     <div id="unknown" class="tab-pane">
         <table id="grid-unknown" class="table table-condensed table-hover table-striped table-responsive">
             <thead>
@@ -496,5 +742,7 @@
         <div style="padding: 0 15px 15px;"><div id="ac-result" style="display: none;"></div></div>
     </div>
 </div>
+
+{{ partial("layout_partials/base_dialog", ['fields': formDialogRule, 'id': 'DialogRule', 'label': lang._('Edit rule')]) }}
 
 {{ partial("OPNsense/AppControl/credit") }}

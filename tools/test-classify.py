@@ -147,11 +147,26 @@ check('-H not believed: empty, or TLS or DNS in another category or none - said 
       ['ndpiReader -H gave no protocol', 'ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web',
        'ndpiReader -H was not read as nDPI writes it: DNS in no category, not Network'])
 
+ids = ndpi.parse_protocol_ids(open(os.path.join(FIX, 'ndpiReader-H.txt'), encoding='utf-8').read())
+check('-H: each protocol\'s id, Unknown\'s 0 too, before the table of risks - After_Risks, id 3 after it, not taken for '
+      'SMTP\'s 3', (len(ids), ids[0], ids[124], ids[3], ids[188]), (17, 'Unknown', 'YouTube', 'SMTP', 'QUIC'))
+hosts = ndpi.parse_hosts(open(os.path.join(FIX, 'ndpiReader-protos-dump-1.txt'), encoding='utf-8').read(), ids)
+check('--protos-dump 1: the names nDPI knows each application by, by the id -H gives it, each once, in order',
+      (hosts['YouTube'], hosts['NetFlix'], sorted(hosts)),
+      (['googlevideo.com', 'youtu.be', 'youtube-nocookie.', 'youtube-ui.l.google.com', 'youtube.', 'youtubeeducation.com',
+        'youtubei.googleapis.com', 'yt3.ggpht.com', 'ytimg.com'],
+       ['-nflxext.example', '-nflxtest.', 'netflix.com', 'nflxso-', 'nflxvideo.net'],
+       ['Canonical', 'Cloudflare', 'Dropbox', 'Mozilla', 'NetFlix', 'Twitch', 'Wikipedia', 'YouTube']))
+check('--protos-dump 1: a name in capitals lower case; the header, a line that is no name and an id, a name of other '
+      'characters, an empty one and one of an id -H does not list, left out',
+      hosts['Dropbox'], ['dropbox.com', 'dropboxstatic.com'])
+
 with tempfile.TemporaryDirectory() as tmp:
     fake = os.path.join(tmp, 'ndpiReader')
     with open(fake, 'w') as handle:
-        handle.write('#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
-                     % (os.path.join(FIX, 'ndpiReader-a1.txt'), os.path.join(FIX, 'ndpiReader-H.txt')))
+        handle.write('#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; --protos-dump) [ "$2" = 1 ] && cat %s ;; esac\n'
+                     % (os.path.join(FIX, 'ndpiReader-a1.txt'), os.path.join(FIX, 'ndpiReader-H.txt'),
+                        os.path.join(FIX, 'ndpiReader-protos-dump-1.txt')))
     os.chmod(fake, 0o755)
     pkg = os.path.join(tmp, 'pkg')
     with open(pkg, 'w') as handle:
@@ -159,23 +174,30 @@ with tempfile.TemporaryDirectory() as tmp:
     os.chmod(pkg, 0o755)
     out = apps.refresh(fake, os.path.join(tmp, 'ndpi.json'), pkg=pkg)
     saved = json.load(open(os.path.join(tmp, 'ndpi.json')))
-    check('apps.py refresh: the categories from -a 1, the protocols from -H, the version from pkg',
-          (out['categories_from'], len(saved['categories']), len(saved['protocols']), saved['version'], saved['reader'],
-           out['errors']), ('ndpiReader -a 1', 93, 16, '6.0.d20260909,1', '6.0.0', []))
+    check('apps.py refresh: the categories from -a 1, the protocols from -H, the names of the host table from '
+          '--protos-dump 1, the version from pkg',
+          (out['categories_from'], len(saved['categories']), len(saved['protocols']), len(saved['hosts']['YouTube']),
+           saved['version'], saved['reader'], out['errors']), ('ndpiReader -a 1', 93, 16, 9, '6.0.d20260909,1', '6.0.0', []))
     shifted = os.path.join(tmp, 'H.txt')
     with open(shifted, 'w') as handle:
         handle.write(open(os.path.join(FIX, 'ndpiReader-H.txt'), encoding='utf-8').read().replace(
             'Safe                  Web', 'Safe                  Media', 1))
-    program(os.path.join(tmp, 'shifted'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
-            % (os.path.join(FIX, 'ndpiReader-a1.txt'), shifted))
+    program(os.path.join(tmp, 'shifted'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; --protos-dump) cat %s ;; esac\n'
+            % (os.path.join(FIX, 'ndpiReader-a1.txt'), shifted, os.path.join(FIX, 'ndpiReader-protos-dump-1.txt')))
     out = apps.refresh(os.path.join(tmp, 'shifted'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
     check('apps.py refresh, -H giving TLS another category: said, for the page', out['errors'],
           ['ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web'])
+    program(os.path.join(tmp, 'no-dump'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
+            % (os.path.join(FIX, 'ndpiReader-a1.txt'), os.path.join(FIX, 'ndpiReader-H.txt')))
+    out = apps.refresh(os.path.join(tmp, 'no-dump'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
+    check('apps.py refresh, --protos-dump 1 giving no name: said - a Suricata rule then matches a protocol alone',
+          (out['errors'], json.load(open(os.path.join(tmp, 'ndpi.json')))['hosts']),
+          (['ndpiReader --protos-dump 1 gave no name: a Suricata rule matches a protocol alone'], {}))
     with open(fake, 'w') as handle:
         handle.write('#!/bin/sh\nexit 1\n')
     out = apps.refresh(fake, os.path.join(tmp, 'ndpi.json'), pkg=pkg)
-    check('apps.py refresh, nDPI answering nothing: categories.json stands in, and it is said',
-          (out['categories_from'], len(out['categories']), len(out['errors'])), ('categories.json', 93, 2))
+    check('apps.py refresh, nDPI answering nothing: categories.json stands in, and it is said - and that it gave no name',
+          (out['categories_from'], len(out['categories']), len(out['errors'])), ('categories.json', 93, 3))
     out = apps.refresh(os.path.join(tmp, 'none'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
     check('apps.py refresh, nDPI not installed: said, no protocol', (out['installed'], out['protocols']), (False, {}))
     check('apps.py list: name to name, for the field', apps.options({'protocols': {'b': 'Web', 'A': 'Web'}}),
@@ -656,7 +678,7 @@ status = state.status()
 check('status.json: what the page reads', sorted(status), sorted(['since', 'windows', 'window', 'totals', 'apps', 'last', 'error',
                                                                   'capped_windows', 'dropped_windows', 'stopped', 'interfaces',
                                                                   'engine', 'blocking', 'remembered', 'waiting_cut',
-                                                                  'last_cut']))
+                                                                  'last_cut', 'rule_cut', 'unread_sources']))
 check('status.json: the totals', {k: status['totals'][k] for k in ('named', 'guessed', 'unknown', 'no_app', 'added', 'refreshed')},
       {'named': 10, 'guessed': 2, 'unknown': 2, 'no_app': 2, 'added': 5, 'refreshed': 5})
 
@@ -1621,6 +1643,26 @@ with tempfile.TemporaryDirectory() as tmp:
         check('cut.py past its time: stopped, said, its file removed, its connections queued again for a second run',
               (time.time() - began < 10, said[-1], cutter.proc, os.listdir(work), [c.get('tries') for c in state.to_cut]),
               (True, 'cut.py took longer than 1 s: 1 connection(s) of a blocked application queued again', None, [], [2]))
+        # what is blocked for whom, given to the run as the service holds it, and written again at a SIGHUP meanwhile
+        kept_to_cut = state.to_cut
+        state.to_cut = [dict(one_cut)]
+        state.policy = {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': True, 'rules': []}}
+        cutter.start(state, T0)
+        given = json.load(open(cutter.policy_path))
+        state.policy = {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': False,
+                                    'rules': [{'uuid': 'u1', 'number': 1, 'source': ['opt2'], 'not': False}]}}
+        cutter.keep_policy(state, T0)
+        again = json.load(open(cutter.policy_path))
+        cutter.proc.kill()
+        cutter.proc.wait()
+        cutter.poll(state, T0)
+        check('a run: given what is blocked as the service holds it, beside its connections; written again as a SIGHUP '
+              'changes it while the run goes - cut.py reads it again before its kills; gone with the run',
+              (sorted(given['policy']), again['policy']['YouTube']['rules'][0]['source'], os.path.exists(cutter.policy_path)),
+              (['YouTube'], ['opt2'], False))
+        cutter.keep_policy(state, T0)
+        check('no run going: nothing written for one', os.listdir(work), [])
+        state.to_cut = kept_to_cut
         run_cutter(cutter, state)
         classify.CUT_TIMEOUT = kept_timeout
         check('past its time again, on their second run: left uncut, said', (state.to_cut, said[-1]),
@@ -1639,13 +1681,14 @@ with tempfile.TemporaryDirectory() as tmp:
 # ------------------------------------------------------------- the service: a blocked application's connection cut
 CUT_STAND_IN = ('#!/usr/bin/env python3\nimport json, sys\nconns = json.load(open(sys.argv[2]))\n'
                 'open(%r, "a").write(json.dumps(conns) + "\\n")\napps = {}\n'
+                'open(%r + ".policy", "a").write(open(sys.argv[3]).read() + "\\n" if len(sys.argv) > 3 else "{}\\n")\n'
                 'for c in conns:\n    apps[c["app"]] = apps.get(c["app"], 0) + 1\n'
                 'print(json.dumps({"connections": len(conns), "cut": len(conns), "states": 2 * len(conns), "dropped": None, '
                 '"apps": apps, "errors": []}))\n')
 
 with tempfile.TemporaryDirectory() as tmp:
     cuts_file = os.path.join(tmp, 'cuts')
-    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % cuts_file)
+    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % (cuts_file, cuts_file))
     state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, cut=os.path.join(tmp, 'cut.py'),
                                               change=lambda text: text.replace('<apps>YouTube</apps>',
                                                                                '<apps></apps><blocked>YouTube</blocked>'))
@@ -1660,11 +1703,45 @@ with tempfile.TemporaryDirectory() as tmp:
     check('the service: what cut.py said, in status.json - the totals, YouTube\'s, the applications blocked',
           ({k: saved['totals'][k] for k in ('to_cut', 'cut', 'cut_states')}, saved['apps']['YouTube'].get('cut'), saved['blocking']),
           ({'to_cut': 1, 'cut': 1, 'cut_states': 2}, 1, ['YouTube']))
+    given = [json.loads(line) for line in open(cuts_file + '.policy')] if os.path.exists(cuts_file + '.policy') else []
+    check('the service: cut.py given what is blocked for whom as the service holds it - the last Apply\'s - not config.xml '
+          'as saved since', given, [{'policy': {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': True, 'rules': []}}}])
+
+# ------------------------------------------------------- the service keeps the Suricata rules of the Rules tab current
+SURICATA_STAND_IN = ('#!/usr/bin/env python3\nimport json, sys\nopen(%r, "a").write(sys.argv[1] + "\\n")\n'
+                     'print(json.dumps({"status": "ok", "changed": False, "errors": ["a test problem"] '
+                     'if sys.argv[1] == "refresh" else []}))\n')
+with tempfile.TemporaryDirectory() as tmp:
+    verbs_file = os.path.join(tmp, 'verbs')
+    program(os.path.join(tmp, 'suricata_rules.py'), SURICATA_STAND_IN % verbs_file)
+    kept_every = classify.SURICATA_EVERY
+    classify.SURICATA_EVERY = 1.5
+    try:
+        state, saved, rows, asked, held = service(
+            tmp, TWO, YOUTUBE, YOUTUBE, suricata=os.path.join(tmp, 'suricata_rules.py'), stop_after=2,
+            change=lambda text: text.replace('</AppControl>', '<rules><rule uuid="cccccccc-0000-4000-8000-000000000001">'
+                                             '<enabled>1</enabled><action>alert</action><source>lan</source>'
+                                             '<source_not>0</source_not><app>YouTube</app><description/></rule></rules>'
+                                             '</AppControl>'))
+        verbs = open(verbs_file).read().split() if os.path.exists(verbs_file) else []
+        said = [e for e in [saved.get('error') or {}] if e]
+        check('the service with a rule of the Rules tab: suricata_rules.py start as it starts - the rules written as the '
+              'settings say - then refresh every SURICATA_EVERY seconds, its answer\'s problems the last error',
+              (verbs[:1], len(verbs) >= 2 and set(verbs[1:]) == {'refresh'},
+               any('the Suricata rules of the Rules tab: a test problem' in e.get('message', '') for e in said)),
+              (['start'], True, True))
+        os.remove(verbs_file)
+        state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, suricata=os.path.join(tmp, 'suricata_rules.py'),
+                                                  stop_after=1)
+        check('the service with no rule switched on: suricata_rules.py never run - Apply took the file away',
+              os.path.exists(verbs_file), False)
+    finally:
+        classify.SURICATA_EVERY = kept_every
 
 # ------------------------------------------------------- the settings read again (SIGHUP): an application blocked since
 with tempfile.TemporaryDirectory() as tmp:
     cuts_file = os.path.join(tmp, 'cuts')
-    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % cuts_file)
+    program(os.path.join(tmp, 'cut.py'), CUT_STAND_IN % (cuts_file, cuts_file))
     real_apply = classify.apply
     seen = {}
 
@@ -1801,6 +1878,475 @@ with tempfile.TemporaryDirectory() as tmp:
     check('status.py: an os-xgs-npu whose hwdrop.py has no release_addresses() - its release of 2026-11-08 - too old for '
           'the cut in hardware, said', status.hardware(config, hw), {'cut_in_hardware': False, 'too_old': True})
     check('status.py: pf\'s rules not to be read - none counted', status.stopped_packets(os.path.join(tmp, 'none')), None)
+
+# ================================================================ phase 3: the rules of the Rules tab
+# ------------------------------------------------------------------------------------ the rules read
+RULES_XML = ('<rules>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000001"><enabled>1</enabled><action>block</action><source>opt2</source>'
+             '<source_not>0</source_not><app>YouTube</app><description>no video for guests</description></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000002"><enabled>1</enabled><action>alert</action><source>any</source>'
+             '<source_not>0</source_not><app>NetFlix</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000003"><enabled>0</enabled><action>block</action><source>lan</source>'
+             '<source_not>0</source_not><app>TikTok</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000004"><enabled>1</enabled><action>block</action>'
+             '<source>Teachers</source><source_not>1</source_not><app>TLS</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000005"><enabled>1</enabled><action>pass</action><source>lan</source>'
+             '<source_not>0</source_not><app>DNS</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000006"><enabled>1</enabled><action>block</action><source></source>'
+             '<source_not>0</source_not><app>DNS</app><description/></rule>'
+             '</rules>')
+R1, R2, R3, R4 = ('aaaaaaaa-0000-4000-8000-00000000000%d' % n for n in (1, 2, 3, 4))
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify>1</classify><blocked>NetFlix</blocked></general>'
+                     + RULES_XML + '</AppControl></OPNsense></opnsense>')
+    conf = tables.settings(config)
+    check('settings: the rules of the Rules tab, in their order, numbered from 1, each with its uuid, action, application, '
+          'source split, inverted or not, description',
+          [(r['number'], r['uuid'][-1], r['enabled'], r['action'], r['app'], r['source'], r['not'], r['description'])
+           for r in conf['rules']],
+          [(1, '1', True, 'block', 'YouTube', ['opt2'], False, 'no video for guests'),
+           (2, '2', True, 'alert', 'NetFlix', ['any'], False, ''), (3, '3', False, 'block', 'TikTok', ['lan'], False, ''),
+           (4, '4', True, 'block', 'TLS', ['Teachers'], True, ''), (5, '5', False, 'pass', 'DNS', ['lan'], False, ''),
+           (6, '6', False, 'block', 'DNS', [], False, '')])
+    check('settings: no rules in config.xml - none', tables.settings(os.path.join(tmp, 'none.xml'))['rules'], [])
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify/></general><rules>'
+                     '<rule uuid="e1"><enabled/><action>block</action><source>lan</source><app>YouTube</app></rule>'
+                     '<rule uuid="e2"><enabled>1</enabled><action/><source>lan</source><app>YouTube</app></rule>'
+                     '<rule uuid="e3"><action>block</action><source>lan</source><app>YouTube</app></rule>'
+                     '</rules></AppControl></OPNsense></opnsense>')
+    empty = tables.settings(config)
+    check('settings: an element there and empty read as the PHP of the rules hook reads it - <classify/> off, <enabled/> off, '
+          '<action/> no action - while one missing takes its default: no rule cut or dropped that pf does not block',
+          (empty['classify'], [(r['uuid'], r['enabled'], r['action']) for r in empty['rules']]),
+          (False, [('e1', False, 'block'), ('e2', False, ''), ('e3', True, 'block')]))
+cat3 = {'categories': {'5': 'Web'}, 'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TikTok': 'SocialNetwork',
+                                                    'TLS': 'Web', 'DNS': 'Network'}}
+check('wanted: a table for the application of each rule switched on - Block or Alert - none for one switched off',
+      sorted(tables.wanted(dict(conf, blocked=[]), cat3)), ['appcontrol_NetFlix', 'appcontrol_TLS', 'appcontrol_YouTube',
+                                                            'appcontrol_cat_Web'])
+check('ruled and tabled: the applications of the rules switched on, with those of the settings',
+      (sorted(tables.ruled(conf)), sorted(tables.tabled(dict(conf, apps=['DNS'])))),
+      (['NetFlix', 'TLS', 'YouTube'], ['DNS', 'NetFlix', 'TLS', 'YouTube']))
+ALL3 = {'appcontrol_%s' % a: {'kind': 'application', 'name': a} for a in ('YouTube', 'NetFlix', 'TikTok', 'TLS', 'DNS')}
+found = tables.policy(conf, ALL3)
+check('policy: NetFlix blocked for every device (Blocked applications) - its Alert rule no block; YouTube from opt2; TLS '
+      'from every device but Teachers; the rule switched off, one of another action and one with no source, none',
+      {app: (f['everyone'], [(r['uuid'][-1], r['source'], r['not']) for r in f['rules']]) for app, f in found.items()},
+      {'NetFlix': (True, []), 'YouTube': (False, [('1', ['opt2'], False)]), 'TLS': (False, [('4', ['Teachers'], True)])})
+check('policy: an application whose table is not made yet - not applied - nothing; classifying off, nothing',
+      (sorted(tables.policy(conf, {k: v for k, v in ALL3.items() if k != 'appcontrol_YouTube'})),
+       tables.policy(dict(conf, classify=False), ALL3)), (['NetFlix', 'TLS'], {}))
+check('blocked: every application blocked, for every device or by a rule, with its table', tables.blocked(conf, ALL3),
+      {'NetFlix': 'appcontrol_NetFlix', 'YouTube': 'appcontrol_YouTube', 'TLS': 'appcontrol_TLS'})
+check('scope: every device; the elements of the rules\' sources; a rule from any is every device',
+      (tables.scope(found['NetFlix']), tables.scope(found['YouTube']), tables.scope(
+          {'everyone': False, 'rules': [{'source': ['any'], 'not': False}]}), tables.scope(None)),
+      (tables.EVERYONE, frozenset({('opt2', False)}), tables.EVERYONE, frozenset()))
+check('covers: every device covers anything; a wider set of sources a narrower one; not the other way, nor every device by '
+      'a set, nor another name for the same devices',
+      [tables.covers(tables.EVERYONE, frozenset({('opt2', False)})), tables.covers(frozenset({('opt2', False), ('lan', False)}),
+                                                                                  frozenset({('opt2', False)})),
+       tables.covers(frozenset({('opt2', False)}), frozenset({('opt2', False), ('lan', False)})),
+       tables.covers(frozenset({('opt2', False)}), tables.EVERYONE), tables.covers(frozenset({('Guests', False)}),
+                                                                                    frozenset({('opt2', False)})),
+       tables.covers(frozenset(), frozenset({('opt2', False)}))], [True, True, False, False, False, False])
+
+# ------------------------------------------------------------------------------------ where a source's devices are
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><interfaces><wan><if>em0</if></wan><lan><if>em1</if></lan><opt2><if>em2</if></opt2>'
+                     '<opt3><descr>none</descr></opt3></interfaces></opnsense>')
+    DEVICES = tables.interface_devices(config)
+    check('the interfaces of config.xml and their devices; one with no device left out', DEVICES,
+          {'wan': 'em0', 'lan': 'em1', 'opt2': 'em2'})
+BY_DEV = tables.device_networks(IFCONFIG_TEXT)
+check('ifconfig -a: each device\'s networks, link-local left out, each once',
+      {d: [str(n) for n in nets] for d, nets in BY_DEV.items()},
+      {'em0': ['203.0.113.0/24'], 'em1': ['192.0.2.0/24', '2001:db8:1::/64'], 'em2': ['198.51.100.128/25'],
+       'lo0': ['127.0.0.0/8', '::1/128'], 'pppoe0': ['203.0.113.50/32']})
+# OpenVPN's and WireGuard's groups: config.xml's interfaces openvpn and wireguard, whose device is the group itself
+GROUPS_TEXT = IFCONFIG_TEXT + '''ovpns1: flags=1008051<UP,POINTOPOINT,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\toptions=80000<LINKSTATE>
+\tinet 10.0.0.1 netmask 0xffffff00
+\tgroups: tun openvpn
+\tnd6 options=101<PERFORMNUD,NO_DAD>
+ovpns2: flags=1008051<UP,POINTOPOINT,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\tinet6 2001:db8:8::1 prefixlen 64
+\tgroups: tun openvpn
+wg0: flags=10080c1<UP,RUNNING,NOARP,MULTICAST,LOWER_UP> metric 0 mtu 1420
+\tinet 172.16.0.1 netmask 0xffffff00
+\tgroups: wg wireguard
+'''
+BY_GROUP = tables.device_networks(GROUPS_TEXT)
+check('ifconfig -a\'s groups: lines - an interface group holds its members\' networks together, as pf\'s (group:network) '
+      'does: OpenVPN\'s from both its servers, WireGuard\'s; a device keeps its own',
+      ({g: [str(n) for n in BY_GROUP[g]] for g in ('openvpn', 'wireguard', 'tun')}, [str(n) for n in BY_GROUP['ovpns1']]),
+      ({'openvpn': ['10.0.0.0/24', '2001:db8:8::/64'], 'wireguard': ['172.16.0.0/24'],
+        'tun': ['10.0.0.0/24', '2001:db8:8::/64']}, ['10.0.0.0/24']))
+group_where = classify.Where()
+group_policy = {'TLS': {'table': 'appcontrol_TLS', 'everyone': False,
+                        'rules': [{'uuid': 'u-vpn', 'number': 1, 'source': ['openvpn'], 'not': False}]}}
+group_where.refresh(group_policy, {'openvpn': 'openvpn', 'wireguard': 'wireguard'}, BY_GROUP, tables.Pf(run=FakePf()))
+check('a source of OpenVPN\'s group: a VPN client\'s device is one of it, a LAN device not, nothing unread',
+      ([group_where.holds(group_policy['TLS']['rules'][0], a) for a in ('10.0.0.5', '2001:db8:8::5', '192.0.2.10')],
+       group_where.unread), ([True, True, False], {}))
+src_pf = FakePf({'Teachers': {'192.0.2.40', '192.0.2.41'}, 'Wing': {'192.0.2.0/25', '!192.0.2.64/26', '192.0.2.70'}})
+RESOLVED = {e: tables.resolve(e, DEVICES, BY_DEV, tables.Pf(run=src_pf))
+            for e in ('any', 'lan', 'opt2', '198.51.100.7', '2001:db8:9::/48', 'Teachers', 'Gone', '(self)', 'lanip')}
+check('a source\'s element resolved: any; an interface\'s networks from ifconfig; an address or a network as written; an '
+      'alias as pf holds its table; an alias pf holds no table for, the firewall itself and an address of its own - unread',
+      {e: (k, [str(n) + ('!' if inv else '') for n, inv in v] if isinstance(v, list) else v) for e, (k, v) in RESOLVED.items()},
+      {'any': ('any', None), 'lan': ('nets', ['192.0.2.0/24', '2001:db8:1::/64']), 'opt2': ('nets', ['198.51.100.128/25']),
+       '198.51.100.7': ('nets', ['198.51.100.7/32']), '2001:db8:9::/48': ('nets', ['2001:db8:9::/48']),
+       'Teachers': ('nets', ['192.0.2.40/32', '192.0.2.41/32']), 'Gone': ('unread', 'pf holds no table Gone'),
+       '(self)': ('unread', '(self) is the firewall itself'), 'lanip': ('unread', 'lanip is the firewall itself')})
+wing = tables.Pf(run=src_pf).entries('Wing')
+held = tables.Held(wing)
+check('a table with an entry written with !: an address in it when the most specific entry holding it is not inverted - '
+      '192.0.2.70 in the hole and in again, 192.0.2.65 in the hole, 192.0.2.10 and nothing else',
+      [a in held for a in ('192.0.2.10', '192.0.2.65', '192.0.2.70', '192.0.2.200', '2001:db8::1', 'no address')],
+      [True, False, True, False, False, False])
+check('flatten: the same addresses written without !, collapsed, IPv4 first',
+      [str(n) for n in tables.flatten(wing + [(tables.ipaddress.ip_network('2001:db8::/64'), False),
+                                              (tables.ipaddress.ip_network('203.0.113.0/24'), True)])],
+      ['192.0.2.0/26', '192.0.2.70/32', '2001:db8::/64'])
+check('flatten: a hole inside a hole already taken out, and a wider one first, change nothing more',
+      [str(n) for n in tables.flatten([(tables.ipaddress.ip_network('192.0.2.0/24'), False),
+                                       (tables.ipaddress.ip_network('192.0.2.0/28'), True),
+                                       (tables.ipaddress.ip_network('192.0.2.0/25'), True)])], ['192.0.2.128/25'])
+
+# ------------------------------------------------------------------------- the classifier's sources
+where = classify.Where()
+POLICY3 = {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': False,
+                       'rules': [{'uuid': R1, 'number': 1, 'source': ['opt2'], 'not': False}]},
+           'TLS': {'table': 'appcontrol_TLS', 'everyone': False,
+                   'rules': [{'uuid': R4, 'number': 4, 'source': ['Teachers'], 'not': True}]},
+           'DNS': {'table': 'appcontrol_DNS', 'everyone': False,
+                   'rules': [{'uuid': 'u-gone', 'number': 7, 'source': ['Gone'], 'not': False},
+                             {'uuid': 'u-gone-not', 'number': 8, 'source': ['Gone'], 'not': True}]}}
+where.refresh(POLICY3, DEVICES, BY_DEV, tables.Pf(run=src_pf))
+check('where: a device in the source\'s network; one outside it; inverted - every device but the alias\'s; an alias that '
+      'cannot be read holds no device, inverted or not',
+      [where.holds(POLICY3['YouTube']['rules'][0], a) for a in ('198.51.100.130', '192.0.2.10')] +
+      [where.holds(POLICY3['TLS']['rules'][0], a) for a in ('192.0.2.40', '192.0.2.10')] +
+      [where.holds(r, '192.0.2.10') for r in POLICY3['DNS']['rules']], [True, False, False, True, False, False])
+check('where: what could not be read, and why', where.unread, {'Gone': 'pf holds no table Gone'})
+
+
+# ------------------------------------------------------------------------------------ a window under the rules
+def rules_state(rules=(), blocked=(), apps=()):
+    """A state whose settings hold the rules given, its addresses those of IFCONFIG_TEXT (em2, 198.51.100.128/25, is the
+    guest network opt2), its interfaces DEVICES."""
+    state = classify.State(T0, catalogue, {'classify': True, 'apps': list(apps), 'blocked': list(blocked),
+                                           'rules': [dict({'number': i + 1, 'enabled': True, 'action': 'block', 'not': False,
+                                                           'description': ''}, **r) for i, r in enumerate(rules)]},
+                           [('lan', 'em1'), ('opt2', 'em2')])
+    state.network = NET
+    state.devices = DEVICES
+    # as the service's first look does, before any window is judged
+    state.where.refresh({}, DEVICES, BY_DEV, tables.Pf(run=FakePf()))
+    return state
+
+
+GUEST_YT = [{'uuid': R1, 'app': 'YouTube', 'source': ['opt2']}]
+RULE_ALIASES = dict(aliases, appcontrol_NetFlix={'kind': 'application', 'name': 'NetFlix'},
+                    appcontrol_TLS={'kind': 'application', 'name': 'TLS'})
+guest = F(('198.51.100.10', 443), client=('198.51.100.130', 51401), iface='opt2')
+staff = F(('198.51.100.11', 443), client=('192.0.2.10', 51402))
+state = rules_state(GUEST_YT)
+fake = FakePf()
+counts = classify.apply(state, [('named', 'TLS.YouTube', guest, row(guest, 'TLS.YouTube', 'www.youtube.example')),
+                                ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube', 'www.youtube.example'))],
+                        tables.Pf(run=fake), RULE_ALIASES, T0 + 70, T0 + 70)
+check('YouTube blocked from the guest network by a rule: a guest\'s connection queued to be cut, for that rule; a LAN '
+      'device\'s not - remembered for when it is',
+      ([(c['client'][0], c['app'], c['rule']) for c in state.to_cut], [classify.unpacked(k)[1][0] for k in state.remembered]),
+      ([('198.51.100.130', 'YouTube', R1)], ['192.0.2.10']))
+check('a table with a block rule from a source takes a server by cut.py alone, as one blocked for every device',
+      fake.held.get('appcontrol_YouTube'), set())
+check('status.json: the applications blocked - by a rule too', state.status()['blocking'], ['YouTube'])
+state = rules_state([{'uuid': R4, 'app': 'TLS', 'source': ['Teachers'], 'not': True}])
+teacher = F(('198.51.100.12', 443), client=('192.0.2.40', 51403))
+classify.apply(state, [('named', 'TLS.YouTube', teacher, row(teacher, 'TLS.YouTube')),
+                       ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))],
+               tables.Pf(run=src_pf), RULE_ALIASES, T0 + 70, T0 + 70)
+check('TLS blocked for every device but the alias Teachers: a teacher\'s connection let through, another\'s cut - as TLS, '
+      'the protocol carrying it, by that rule', [(c['client'][0], c['app'], c['rule']) for c in state.to_cut],
+      [('192.0.2.10', 'TLS', R4)])
+state = rules_state([{'uuid': 'u-gone', 'app': 'YouTube', 'source': ['Gone']}])
+said = []
+real_log = classify.log
+classify.log = said.append
+try:
+    classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=src_pf), RULE_ALIASES,
+                   T0 + 70, T0 + 70)
+    classify.say_unread(state, T0 + 70)
+    classify.say_unread(state, T0 + 130)
+finally:
+    classify.log = real_log
+check('a rule whose source cannot be read - an alias pf holds no table for: nothing cut, said once as the last error',
+      (state.to_cut, said, state.status()['unread_sources']),
+      ([], ['part of a block rule\'s source cannot be read, and its devices are not cut: pf holds no table Gone'],
+       {'Gone': 'pf holds no table Gone'}))
+state = rules_state(GUEST_YT, blocked=['YouTube'])
+classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()), RULE_ALIASES,
+               T0 + 70, T0 + 70)
+check('blocked for every device as well (Blocked applications): any device\'s connection cut, for no rule',
+      [(c['client'][0], c['rule']) for c in state.to_cut], [('192.0.2.10', '')])
+state = rules_state(GUEST_YT + [{'uuid': R4, 'app': 'TLS', 'source': ['opt2']}])
+classify.apply(state, [('named', 'TLS.YouTube', guest, row(guest, 'TLS.YouTube'))], tables.Pf(run=FakePf()), RULE_ALIASES,
+               T0 + 70, T0 + 70)
+check('YouTube and TLS, the protocol carrying it, both blocked from the guests by two rules: cut as YouTube, by its rule - '
+      'nDPI\'s application before the protocol, as Blocked applications has it', [(c['app'], c['rule']) for c in state.to_cut],
+      [('YouTube', R1)])
+
+# a server two applications share, blocked for different devices
+gm_lan = F(('198.51.100.10', 443), client=('192.0.2.20', 51404))
+gm_rec = ('named', 'TLS.GMail', gm_lan, row(gm_lan, 'TLS.GMail', 'mail.example'))
+guest_rec = ('named', 'TLS.YouTube', guest, row(guest, 'TLS.YouTube', 'www.youtube.example'))
+GMAIL = dict(RULE_ALIASES, appcontrol_GMail={'kind': 'application', 'name': 'GMail'})
+for gmail_rule, want, what in (
+        (None, True, 'GMail not blocked at all'),
+        ({'uuid': 'u-gm', 'app': 'GMail', 'source': ['lan']}, True, 'GMail blocked for the LAN alone'),
+        ({'uuid': 'u-gm', 'app': 'GMail', 'source': ['lan', 'opt2']}, False, 'GMail blocked for the LAN and the guests'),
+        ({'uuid': 'u-gm', 'app': 'GMail', 'source': ['any']}, False, 'GMail blocked for every device')):
+    state = rules_state(GUEST_YT + ([gmail_rule] if gmail_rule else []))
+    classify.apply(state, [gm_rec, guest_rec], tables.Pf(run=FakePf()), GMAIL, T0 + 70, T0 + 70)
+    check('YouTube blocked from the guests, its server named GMail as well, %s: the guest\'s connection cut %s' % (
+        what, 'alone - its server for no table, it would stop GMail for guests it lets through' if want else
+        'and its server for the table - GMail is blocked for every guest anyway'),
+        [(c['app'], c['alone']) for c in state.to_cut if c['client'][0] == '198.51.100.130'], [('YouTube', want)])
+state = rules_state(GUEST_YT)
+state.blocking = {'YouTube': 'appcontrol_YouTube'}       # blocked before: its table not emptied
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10', '198.51.100.11'}})
+counts = classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
+check('a server in a table blocked from the guests, named GMail - not blocked for them: taken out of it',
+      (sorted(fake.held['appcontrol_YouTube']), counts['untabled']), (['198.51.100.11'], 1))
+state = rules_state(GUEST_YT + [{'uuid': 'u-gm', 'app': 'GMail', 'source': ['opt2']}])
+state.blocking = {'YouTube': 'appcontrol_YouTube', 'GMail': 'appcontrol_GMail'}
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10'}})
+classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
+check('the same, GMail blocked from the guests too: left in it', fake.held['appcontrol_YouTube'], {'198.51.100.10'})
+state = rules_state(GUEST_YT + [{'uuid': 'u-gm', 'app': 'GMail', 'source': ['lan']}])
+state.blocking = {'YouTube': 'appcontrol_YouTube', 'GMail': 'appcontrol_GMail'}
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10'}})
+classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
+check('the same, GMail blocked for the LAN alone - let through for the guests: taken out', fake.held['appcontrol_YouTube'],
+      set())
+
+# what waits, cut another way now: whether its server is shared asked again for the application it is cut as
+state = rules_state(GUEST_YT)
+classify.apply(state, [gm_rec, guest_rec], tables.Pf(run=FakePf()), GMAIL, T0 + 70, T0 + 70)
+before = [(c['app'], c['alone']) for c in state.to_cut]
+state.conf = dict(state.conf, rules=[dict(number=1, uuid=R4, enabled=True, action='block', app='TLS', source=['opt2'],
+                                          description='', **{'not': False})])
+classify.block(state, GMAIL, T0 + 80, tables.Pf(run=FakePf()))
+check('a guest\'s connection waiting as YouTube - its server named GMail too, not blocked: alone - then YouTube\'s rule '
+      'gone and TLS blocked for the guests: cut as TLS, and its server no longer alone - TLS\'s block reaches every guest '
+      'GMail\'s name would', (before, [(c['app'], c['alone']) for c in state.to_cut]), ([('YouTube', True)], [('TLS', False)]))
+
+# a source that gains a device: what is remembered looked at again for it
+kids_pf = FakePf({'Kids': {'192.0.2.50'}})
+state = rules_state([{'uuid': R1, 'app': 'YouTube', 'source': ['Kids']}])
+classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=kids_pf), RULE_ALIASES,
+               T0 + 70, T0 + 70)
+queued_before = len(state.to_cut)
+kids_pf.held['Kids'].add('192.0.2.10')
+state.where.refresh(state.policy, DEVICES, BY_DEV, tables.Pf(run=kids_pf))       # as each window's close reads it
+classify.block(state, RULE_ALIASES, T0 + 80, tables.Pf(run=kids_pf))
+check('an alias of a rule\'s source that gains a device - a hostname resolved again: the connection of that device '
+      'remembered is cut now, not only its new ones', (queued_before, [(c['client'][0], c['rule']) for c in state.to_cut],
+                                                       len(state.remembered)), (0, [('192.0.2.10', R1)], 0))
+
+# config.xml not to be read for a moment: the interfaces as last read
+with tempfile.TemporaryDirectory() as tmp:
+    state = rules_state([])
+    broken = os.path.join(tmp, 'config.xml')
+    with open(broken, 'w') as handle:
+        handle.write('<opnsense')
+    check('config.xml not to be read at a window\'s close: the interfaces kept as last read - an interface\'s name never '
+          'taken for an alias\'s, no "pf holds no table lan"', (classify.read_devices(state, broken), tables.interface_devices(
+              broken)), (DEVICES, None))
+
+# the rules change: what waits for a cut, and what is remembered, looked at again
+state = rules_state(GUEST_YT)
+classify.apply(state, [guest_rec, ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()),
+               RULE_ALIASES, T0 + 70, T0 + 70)
+state.conf = dict(state.conf, rules=[dict(state.conf['rules'][0], source=['lan'])])
+classify.block(state, RULE_ALIASES, T0 + 80, tables.Pf(run=FakePf()))
+check('the rule\'s source changed from the guests to the LAN: the guest\'s connection waiting dropped, counted; the LAN '
+      'device\'s, remembered, queued now for the rule', ([(c['client'][0], c['rule']) for c in state.to_cut],
+                                                        state.totals['cut_unblocked'], len(state.remembered)),
+      ([('192.0.2.10', R1)], 1, 0))
+state = rules_state([])
+classify.apply(state, [guest_rec, ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()),
+               RULE_ALIASES, T0 + 70, T0 + 70)
+state.conf = dict(state.conf, rules=[dict(GUEST_YT[0], number=1, enabled=True, action='block', **{'not': False},
+                                          description='')])
+emptied = classify.block(state, RULE_ALIASES, T0 + 80, tables.Pf(run=FakePf()))[1]
+check('a block rule added: the guests\' connection it remembered cut at once, the LAN device\'s left remembered; the '
+      'application\'s table, blocked since, given back to be emptied',
+      ([c['client'][0] for c in state.to_cut], [classify.unpacked(k)[1][0] for k in state.remembered], emptied),
+      (['198.51.100.130'], ['192.0.2.10'], ['appcontrol_YouTube']))
+state.to_cut = []
+classify.block(state, RULE_ALIASES, T0 + 90, tables.Pf(run=FakePf()))
+check('the same rules looked at again: nothing more queued', state.to_cut, [])
+
+# what cut.py says, for each rule
+state = rules_state(GUEST_YT)
+classify.count_cut(state, {'cut': 3, 'apps': {'YouTube': 3}, 'rules': {R1: 2, '': 1}}, 3, T0)
+classify.count_cut(state, {'cut': 1, 'rules': {R1: 1, 'bad': 'x'}}, 1, T0)
+check('cut.py\'s answer for each rule counted - \'\' for Blocked applications - and in status.json',
+      (state.rule_cut, state.status()['rule_cut']), ({R1: 3, '': 1, 'bad': 0}, {R1: 3, '': 1, 'bad': 0}))
+
+# read again (SIGHUP): the rules and their sources read again
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><interfaces><lan><if>em1</if></lan><opt2><if>em2</if></opt2></interfaces><OPNsense><Firewall>'
+                     '<Alias><aliases><alias><enabled>1</enabled><name>appcontrol_YouTube</name><type>external</type>'
+                     '<description>Application Control: YouTube</description></alias></aliases></Alias></Firewall>'
+                     '<AppControl><general><classify>1</classify></general><rules><rule uuid="%s"><enabled>1</enabled>'
+                     '<action>block</action><source>opt2</source><source_not>0</source_not><app>YouTube</app></rule></rules>'
+                     '</AppControl></OPNsense></opnsense>' % R1)
+    state = rules_state([])
+    state.network.by_dev = BY_DEV
+    classify.apply(state, [guest_rec], tables.Pf(run=FakePf()), RULE_ALIASES, T0 + 70, T0 + 70)
+    emptied = classify.reread(state, config, os.path.join(tmp, 'ndpi.json'), tables.Pf(run=FakePf()))
+    check('read again, a block rule of the guests there since: its remembered guest connection cut at once, its table '
+          'given back to be emptied', ([(c['client'][0], c['rule']) for c in state.to_cut], emptied, state.devices),
+          ([('198.51.100.130', R1)], ['appcontrol_YouTube'], {'lan': 'em1', 'opt2': 'em2'}))
+
+# --------------------------------------------------------------------------- what the page reads of the rules
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><Firewall><Alias><aliases>' + ''.join(
+            '<alias><enabled>1</enabled><name>appcontrol_%s</name><type>external</type><description>Application Control: %s'
+            '</description></alias>' % (a, a) for a in ('YouTube', 'NetFlix')) + '</aliases></Alias></Firewall>'
+            '<IDS><general><enabled>1</enabled><mode>netmap</mode><interfaces>lan,opt2</interfaces></general></IDS>'
+            '<AppControl><general><classify>1</classify></general>' + RULES_XML + '</AppControl></OPNsense></opnsense>')
+    with open(os.path.join(tmp, 'status.json'), 'w') as handle:
+        json.dump({'rule_cut': {R1: 4}}, handle)
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'at': T0, 'lines': 37, 'rules': {R1: {'lines': 37, 'reason': None}, R4: {'lines': 0, 'reason': 'unread'}},
+                   'errors': []}, handle)
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump({'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TikTok': 'SocialNetwork', 'DNS': 'Network'}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'status.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules: each rule\'s state - acting, its table there; switched off; one the installed nDPI does not know; '
+          'not applied yet - and the connections cut for it, what its Suricata lines are',
+          {k[-1]: (v['state'], v['table'], v['cut'], (v['suricata'] or {}).get('lines'), (v['suricata'] or {}).get('reason'))
+           for k, v in found['rules'].items()},
+          {'1': ('active', 'appcontrol_YouTube', 4, 37, None), '2': ('active', 'appcontrol_NetFlix', 0, None, None),
+           '3': ('disabled', '', 0, None, None), '4': ('unknown_app', '', 0, 0, 'unread'), '5': ('disabled', '', 0, None, None),
+           '6': ('disabled', '', 0, None, None)})
+    check('status.py rules: the Intrusion Detection - on, IPS (netmap), its interfaces and their names, none of them internal '
+          'here, Suricata not running; the rules file\'s lines', (found['ids'], found['suricata']['lines']),
+          ({'enabled': True, 'mode': 'ips', 'interfaces': ['lan', 'opt2'], 'names': ['LAN', 'OPT2'], 'internal': [],
+            'running': False}, 37))
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump({'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TLS': 'Web'}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'none.json'), os.path.join(tmp, 'ndpi.json'),
+                         os.path.join(tmp, 'none.pid'))
+    check('status.py rules: an application nDPI knows, its table not made yet - not applied yet; nothing cut nor written yet',
+          (found['rules'][R4]['state'], found['rules'][R4]['cut'], found['rules'][R4]['suricata'], found['suricata']['lines']),
+          ('pending', 0, None, 0))
+    check('status.py rules: the Intrusion Detection off, or IDS mode (pcap) - said', [status.ids(c, os.path.join(tmp, 'none.pid'))
+                                                                                       for c in (os.path.join(tmp, 'none.xml'),)],
+          [{'enabled': False, 'mode': 'ids', 'interfaces': [], 'names': [], 'internal': [], 'running': False}])
+
+    # against what the last Apply put in force: the rules suricata_rules.py kept as it applied them
+    now_rules = tables.settings(config)['rules']
+    kept_rules = [dict(r) for r in now_rules if r['number'] != 2]       # rule 2, NetFlix, added since
+    kept_rules[0]['source'] = ['lan']                                   # rule 1 applied from the LAN, changed since
+    kept_rules[1]['enabled'] = True                                     # rule 3 applied switched on, off since
+    kept_rules.append(dict(kept_rules[0], uuid='aaaaaaaa-0000-4000-8000-000000000009', number=9))   # deleted since
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'at': T0, 'lines': 0, 'rules': {}, 'applied': {'classify': True, 'rules': kept_rules}, 'errors': []},
+                  handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules, against what was applied: a rule\'s source changed, a rule added, one switched off since - '
+          'changed, not applied yet, pf and Suricata acting as before; one applied as it is - as it was; one switched off '
+          'then and now - switched off; and the rule deleted since, still acting until Apply, counted',
+          ({k[-1]: v['state'] for k, v in found['rules'].items()}, found['gone']),
+          ({'1': 'changed', '2': 'changed', '3': 'changed', '4': 'pending', '5': 'disabled', '6': 'disabled'}, 1))
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'rules': {R1: {'lines': 0, 'reason': 'unread', 'unread': ['opt2'], 'empty': False},
+                             R2: {'lines': 0, 'reason': 'empty', 'unread': [], 'empty': True}},
+                   'applied': {'classify': True, 'rules': now_rules}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules: a rule in force whose source cannot be read now - an alias gone - acts on no device; one whose '
+          'source holds no device\'s address now - an interface without one - neither; nothing deleted since',
+          (found['rules'][R1]['state'], found['rules'][R2]['state'], found['gone']), ('unread', 'empty', 0))
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'rules': {R1: {'lines': 35, 'refused': 1, 'refused_by': 'E: why'}}, 'engine': {
+            'state': 'refused', 'refused': 1, 'message': None}, 'applied': {'classify': True, 'rules': now_rules}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules: Suricata\'s own test of the file, and the lines of a rule it refused, passed on to the page',
+          (found['suricata']['engine'], found['rules'][R1]['suricata']['refused']),
+          ({'state': 'refused', 'refused': 1, 'message': None}, 1))
+    youtube_rule = now_rules[0]
+    check('status.py rules: part of a source not read - the rest acts; inverted, one element not read - it acts on none',
+          [status.rule_state(dict(youtube_rule, source=s, **{'not': n}), {'classify': True}, None, {'unread': u},
+                             {'YouTube': 'Media'}, 'appcontrol_YouTube')
+           for s, n, u in ((['opt2', 'Kids'], False, ['Kids']), (['Kids'], True, ['Kids']), (['opt2', 'Kids'], False, []))],
+          ['active', 'unread', 'active'])
+    ids_on = []
+    for reads in ('wan', 'lan,opt2'):
+        with open(config, 'w') as handle:
+            handle.write('<opnsense><interfaces><wan><enable>1</enable><if>em0</if><descr>WAN</descr><ipaddr>dhcp</ipaddr>'
+                         '</wan><lan><enable>1</enable><if>em1</if><ipaddr>192.0.2.1</ipaddr></lan><opt2><enable>1</enable>'
+                         '<if>em2</if><descr>GUEST</descr><ipaddr>198.51.100.129</ipaddr></opt2></interfaces><OPNsense><IDS>'
+                         '<general><enabled>1</enabled><mode>pcap</mode><interfaces>%s</interfaces></general></IDS></OPNsense>'
+                         '</opnsense>' % reads)
+        found = status.ids(config, os.path.join(tmp, 'none.pid'))
+        ids_on.append((found['names'], found['internal']))
+    check('status.py rules: the Intrusion Detection on the WAN alone - by its name, no internal interface among them, where '
+          'Suricata sees no device\'s own address after NAT; on the LAN and the guests - both internal',
+          ids_on, [(['WAN'], []), (['LAN', 'GUEST'], ['lan', 'opt2'])])
+    with open(os.path.join(tmp, 'suricata.pid'), 'w') as handle:
+        handle.write(str(os.getpid()))
+    check('status.py rules: a pidfile naming a live process that is not Suricata - not running',
+          status.ids(config, os.path.join(tmp, 'suricata.pid'))['running'], False)
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify>0</classify></general>' + RULES_XML +
+                     '</AppControl></OPNsense></opnsense>')
+    check('status.py rules: classifying off - every rule off', sorted({v['state'] for v in status.rules(
+        config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'none.json'), os.path.join(tmp, 'ndpi.json'),
+        os.path.join(tmp, 'none.pid'))['rules'].values()}), ['off'])
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><Firewall><Alias><aliases><alias><enabled>1</enabled><name>appcontrol_YouTube</name>'
+                     '<type>external</type><description>Application Control: YouTube</description></alias></aliases></Alias>'
+                     '</Firewall><AppControl><general><classify>1</classify></general>' + RULES_XML +
+                     '</AppControl></OPNsense></opnsense>')
+    with open(os.path.join(tmp, 'status.json'), 'w') as handle:
+        json.dump({'totals': {'cut': 4}, 'apps': {'YouTube': {'category': 'Media', 'named': 5, 'cut': 4}}}, handle)
+    # pfctl -v -s rules: the rule of the guests' block, from their network
+    with open(os.path.join(tmp, 'rules.txt'), 'w') as handle:
+        handle.write('block drop in quick inet from (em2:network) to <appcontrol_YouTube:3> label "x"\n'
+                     '  [ Evaluations: 9         Packets: 6         Bytes: 360         States: 0     ]\n')
+    program(os.path.join(tmp, 'pfctl'), '#!/bin/sh\ncase "$*" in "-v -s rules") cat %s ;; esac\n'
+            % os.path.join(tmp, 'rules.txt'))
+    report = status.report(os.path.join(tmp, 'status.json'), config, os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'),
+                           os.path.join(tmp, 'pfctl'), os.path.join(tmp, 'none'), os.path.join(tmp, 'none.py'))
+    rows3 = {a['name']: a for a in report['apps']}
+    check('status.py: YouTube blocked by a rule alone - not for every device - its table, its block rules, the packets they '
+          'stopped; NetFlix of an Alert rule, its table not made yet',
+          ({k: rows3['YouTube'][k] for k in ('blocked', 'rules', 'ruled', 'table', 'packets', 'cut')},
+           {k: rows3['NetFlix'][k] for k in ('blocked', 'rules', 'ruled', 'table')}),
+          ({'blocked': False, 'rules': 1, 'ruled': True, 'table': 'appcontrol_YouTube', 'packets': 6, 'cut': 4},
+           {'blocked': False, 'rules': 0, 'ruled': True, 'table': ''}))
+    check('status.py: the blocking line - nothing blocked for every device, one block rule acting, its packets',
+          {k: report['blocking'][k] for k in ('apps', 'rules', 'packets')}, {'apps': [], 'rules': 1, 'packets': 6})
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)

@@ -17,6 +17,19 @@ first. Its table takes a server only when the firewall's own resolver
 gives that address for the name the connection carried. What was dropped
 there is handed back once the application is no longer blocked.
 
+The Rules tab acts on an application for the devices of a source - an
+interface's network, a group's, an alias, an address or a network, or
+every device but one of them. Block puts the plugin's block rule on the
+application's table from that source alone, cuts its connections from
+there, and writes a Suricata rule for OPNsense's own Intrusion Detection;
+Alert writes the Suricata rule alone. A Suricata rule matches the names
+the installed nDPI knows the application by - TLS and QUIC server names,
+HTTP's Host, DNS questions - as nDPI matches them, or the protocol when
+Suricata reads it, on a device's way to the internet alone, never to the
+firewall or its own networks. Suricata tests each new rules file first,
+and the lines follow their sources as they change. The tab says what each
+rule does against what the last Apply put in force.
+
 Plugin Changelog
 ================
 

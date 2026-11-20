@@ -1,0 +1,27 @@
+ProtocolName		ProtocolId
+googlevideo.com	124
+youtube.	124
+youtubei.googleapis.com	124
+youtube-nocookie.	124
+youtube-ui.l.google.com	124
+youtubeeducation.com	124
+youtu.be	124
+yt3.ggpht.com	124
+ytimg.com	124
+netflix.com	133
+nflxvideo.net	133
+-nflxext.example	133
+nflxso-	133
+-nflxtest.	133
+twitch.tv	195
+wikipedia.	176
+mozilla.org	220
+ubuntu.com	169
+cloudflare.com	221
+dropbox.com	121
+DropboxStatic.com	121
+not a name	121
+bad"name.example	121
+unknown-id.example	9999
+	124
+youtube.	124

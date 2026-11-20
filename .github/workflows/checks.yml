@@ -22,7 +22,8 @@ name: checks
 # And what this plugin adds: the classifier read against ndpiReader's own CSV as the
 # phase 0 lab had it, a guess never put in a table, the aliases written through stand-ins
 # of OPNsense's Alias model, a blocked application's rules and the cut of its connections,
-# and the install and removal run in a temporary root.
+# the rules of the Rules tab - in pf, in the cut and as Suricata rules - and the install and
+# removal run in a temporary root.
 
 on:
   push:
@@ -72,6 +73,18 @@ jobs:
       # The block rules the plugin registers, with stand-ins for OPNsense's Firewall Plugin and Alias model.
       - name: The block rules of the applications blocked
         run: php tools/test-rules.php
+
+      # The rules of the Rules tab as Suricata rules: the names nDPI knows an application by, held against
+      # nDPI's own matching rule, the sources as Suricata writes addresses, the plugin's template rendered
+      # with Jinja2 as on a firewall - where OPNsense's configd brings it - and the file written or not.
+      - name: The Suricata rules of the Rules tab
+        run: |
+          python3 -c 'import jinja2' 2> /dev/null || python3 -m pip install --quiet jinja2
+          python3 tools/test-suricata.py
+
+      # A rule's source as the model takes it, with stand-ins for OPNsense's BaseModel.
+      - name: The model's checks of a rule
+        run: php tools/test-model.php
 
       # The page's API: the status passed on, the grids' rows, and Apply's order - the aliases, the
       # filter, cron, the tables of aliases gone, the classifier - with stand-ins for OPNsense's MVC base.
