@@ -18,7 +18,9 @@
  * as it was. And a block rule of the Rules tab: the same two rules from its source alone - an interface's
  * network, an alias inverted, several at once - described with the source as the pages name it, after those
  * of Blocked applications; none for an Alert rule, one switched off, one of an application whose table is
- * not made, one of another action or with no source; one rule read as config.xml gives one, without a list.
+ * not made, one of another action or with no source; one rule read as config.xml gives one, without a list;
+ * an address or a network written by hand in its own family's rule alone, inverted the other family's from
+ * any, and no rule registered with an address of the other family, which pfctl refuses with every rule.
  *
  *   php tools/test-rules.php
  */
@@ -208,11 +210,58 @@ namespace {
         ['Application Control: block TikTok from not Teachers', 'Teachers', true, '<appcontrol_TikTok>', 'inet6'],
         ['Application Control: block YouTube from LAN net, OPT3 net, 192.0.2.0/24', 'lan,opt3,192.0.2.0/24', false,
             '<appcontrol_YouTube>', 'inet'],
-        ['Application Control: block YouTube from LAN net, OPT3 net, 192.0.2.0/24', 'lan,opt3,192.0.2.0/24', false,
+        ['Application Control: block YouTube from LAN net, OPT3 net, 192.0.2.0/24', 'lan,opt3', false,
             '<appcontrol_YouTube>', 'inet6'],
     ], 'a block rule of the Rules tab: two rules from its source alone - an interface\'s network, an alias inverted, several ' .
-        'at once - described with the source as the pages name it, after those of Blocked applications; none for an Alert ' .
-        'rule, one switched off, Zoom (no table yet), one of another action and one with no source');
+        'at once, an address written by hand in its own family\'s rule alone - described with the source as the pages name ' .
+        'it, after those of Blocked applications; none for an Alert rule, one switched off, Zoom (no table yet), one of ' .
+        'another action and one with no source');
+
+    /* an address or a network written by hand: the rule of its own family alone - pfctl refuses the other's */
+    $typed = with_rules(['classify' => '1'], [
+        rule('t1', 'YouTube', '192.0.2.5'),
+        rule('t2', 'YouTube', '2001:db8::/48'),
+        rule('t3', 'TikTok', '192.0.2.5', ['source_not' => '1']),
+        rule('t4', 'TikTok', '2001:db8::7', ['source_not' => '1']),
+        rule('t5', 'YouTube', '198.51.100.0/24'),
+    ], $aliases);
+    check(array_map(function ($r) {
+        return [$r[1]['ipprotocol'], $r[1]['from'], $r[1]['from_not']];
+    }, $typed) === [
+        ['inet', '192.0.2.5', false],
+        ['inet6', '2001:db8::/48', false],
+        ['inet', '192.0.2.5', true],
+        ['inet6', 'any', false],
+        ['inet', 'any', false],
+        ['inet6', '2001:db8::7', true],
+        ['inet', '198.51.100.0/24', false],
+    ], 'an address written by hand: its own family\'s rule alone - an IPv4 address in IPv4\'s, an IPv6 network in IPv6\'s; ' .
+        'inverted, its own family\'s rule from every device but it and the other family\'s from any - every device of that ' .
+        'family is not that address');
+
+    /* every registered rule: no element of its source an address of the other family, which pfctl refuses whole */
+    $family = function ($element) {
+        $address = explode('/', $element, 2)[0];
+        if (filter_var($address, FILTER_VALIDATE_IP) === false) {
+            return null;
+        }
+        return strpos($address, ':') === false ? 'inet' : 'inet6';
+    };
+    $wrong = [];
+    foreach (array_merge($got, $typed) as $r) {
+        foreach (explode(',', (string)($r[1]['from'] ?? '')) as $element) {
+            $found = $family($element);
+            if ($found !== null && $found !== $r[1]['ipprotocol']) {
+                $wrong[] = $r[1]['ipprotocol'] . ' from ' . $element;
+            }
+        }
+    }
+    check($wrong === [], 'every rule registered: each address of its source of its own family - pfctl refuses a rule that ' .
+        'expands to no valid combination, and with it every rule of the firewall');
+    check(appcontrol_address_family('192.0.2.0/33') === null && appcontrol_address_family('lan') === null &&
+        appcontrol_address_family('any') === null && appcontrol_address_family('2001:db8::/129') === null &&
+        appcontrol_address_family('::ffff:192.0.2.1') === 'inet6',
+        'the family of an element: none for an interface\'s network, an alias, any or what is no network; IPv6 with a colon');
     $first = $got[2][1];
     check($got[2][0] === 1 && $first['type'] === 'block' && $first['direction'] === 'in' && $first['quick'] === true &&
         $first['log'] === true && !isset($first['interface']),
