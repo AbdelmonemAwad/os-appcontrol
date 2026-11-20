@@ -515,6 +515,8 @@ def produce(summary, conf, applied, config, catalogue_path=None, path=None, temp
     if conf['classify'] and any(rule['enabled'] for rule in conf['rules']):
         catalogue = tables.load_catalogue(catalogue_path or tables.CATALOGUE)
         devices = tables.interface_devices(config)
+        if devices is None:
+            return failed(summary, '%s could not be read: the Suricata rules left as they were' % config)
         listed = tables.ifconfig(ifconfig or IFCONFIG)
         own = tables.addresses(listed)
         if not own:

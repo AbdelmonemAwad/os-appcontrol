@@ -431,14 +431,15 @@ with tempfile.TemporaryDirectory() as tmp:
     check('with os-xgs-npu: how many it dropped, in the summary', (summary['dropped'], summary['cut'], summary['hardware']),
           (3, 3, 'ready'))
     check('the module search path as it was', sys.path, path_before)
-    check('what was dropped written down: each application\'s server, nothing of the device - no address, port or time',
-          json.load(open(cut.DROPPED)), {'dropped': [{'app': 'TikTok', 'server': '198.51.100.40'},
-                                                     {'app': 'TikTok', 'server': '2001:db8::443'},
-                                                     {'app': 'YouTube', 'server': '198.51.100.10'}]})
+    check('what was dropped written down: each application\'s server and the block it was dropped for - \'\' for every '
+          'device - nothing of the device: no address, port or time',
+          json.load(open(cut.DROPPED)), {'dropped': [{'app': 'TikTok', 'rule': '', 'server': '198.51.100.40'},
+                                                     {'app': 'TikTok', 'rule': '', 'server': '2001:db8::443'},
+                                                     {'app': 'YouTube', 'rule': '', 'server': '198.51.100.10'}]})
     cut.cut(CONNS[3:4], NOW, ask=ask)
     check('a server dropped again: written down once, the latest last', json.load(open(cut.DROPPED))['dropped'],
-          [{'app': 'TikTok', 'server': '198.51.100.40'}, {'app': 'YouTube', 'server': '198.51.100.10'},
-           {'app': 'TikTok', 'server': '2001:db8::443'}])
+          [{'app': 'TikTok', 'rule': '', 'server': '198.51.100.40'}, {'app': 'YouTube', 'rule': '', 'server': '198.51.100.10'},
+           {'app': 'TikTok', 'rule': '', 'server': '2001:db8::443'}])
 
     os.remove(cut.DROPPED)
     log = setup(tmp)
@@ -577,7 +578,25 @@ with tempfile.TemporaryDirectory() as tmp:
         handle.write('{"dropped": [{"app": "YouTube"}, "x", {"server": "198.51.100.1", "app": "Zoom", "client": ['
                      '"192.0.2.10", 1]}]}')
     check('a written-down list with rows that are not rows: those left out; a device\'s address an older one kept, '
-          'not read', cut.entries(), [{'app': 'Zoom', 'server': '198.51.100.1'}])
+          'not read; a row of no rule - written before rules were - for every device',
+          cut.entries(), [{'app': 'Zoom', 'rule': '', 'server': '198.51.100.1'}])
+    # by rule: TikTok blocked by two rules, one of them removed - its servers handed back, less those the other holds
+    RULE_A, RULE_B = 'bbbbbbbb-0000-4000-8000-00000000000a', 'bbbbbbbb-0000-4000-8000-00000000000b'
+    cut.keep([{'app': 'TikTok', 'rule': RULE_A, 'server': '198.51.100.40'},
+              {'app': 'TikTok', 'rule': RULE_A, 'server': '198.51.100.41'},
+              {'app': 'TikTok', 'rule': RULE_B, 'server': '198.51.100.41'}])
+    log = setup(tmp)
+    EVENTS.result = 1
+    with open(cut.CONFIG, 'w') as handle:
+        handle.write(CONFIG.replace('</AppControl>', '<rules><rule uuid="%s"><enabled>1</enabled><action>block</action>'
+                                                     '<source>lan</source><source_not>0</source_not><app>TikTok</app>'
+                                                     '</rule></rules></AppControl>' % RULE_B)
+                     % (aliases('TikTok'), '1', ''))
+    summary = cut.release(cut.CONFIG)
+    check('a rule removed while another still blocks its application: what was dropped for it handed back - less the '
+          'server the other rule\'s drops hold - its rows let go, the other\'s kept',
+          (calls(log), summary['released'], [(r['rule'][-1], r['server']) for r in cut.entries()]),
+          (['hwdrop release_addresses ["198.51.100.40"]'], 1, [('b', '198.51.100.41')]))
 
 # ------------------------------------------------------------------------------------------- the command line
 

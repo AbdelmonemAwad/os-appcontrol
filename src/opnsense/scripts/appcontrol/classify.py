@@ -313,6 +313,7 @@ class State:
         self.blocking = {}              # {application: its table}, as last read (tables.blocked())
         self.policy = {}                # {application: whom it is blocked for}, as last read (tables.policy())
         self.where = Where()            # the sources of the block rules, resolved
+        self.where_held = None          # what they held at the last look at what is blocked (Where.digest())
         self.devices = {}               # {interface: device}, as config.xml last said
         self.unread_said = set()        # the elements of a source said not to be read
         self.remembered = {}            # packed() of its two ends -> (name, began, name it carried), oldest first
@@ -511,10 +512,12 @@ def block(state, aliases, mono=None, pf=None):
     """The applications blocked now (tables.policy()) - for every device, or for the sources of block rules,
     each element of a new source resolved (Where). What waits for a cut is looked at again: a connection no
     longer blocked for its device is dropped from the queue, counted; one blocked another way now - by another
-    rule - is cut that way. When what is blocked has changed, every connection remembered is looked at, and one
-    blocked now for its device is queued to be cut - its server put in its table by cut.py, as any other's.
-    The tables of the applications blocked since the last look are given back to be emptied first: what went
-    into them while they were not blocked went in on a name alone. ({application: table}, [tables to empty])."""
+    rule, or as another application - is cut that way, whether its server is shared worked out again for it.
+    When what is blocked has changed - the policy, or what its sources hold: an alias that gained a device -
+    every connection remembered is looked at, and one blocked now for its device is queued to be cut - its
+    server put in its table by cut.py, as any other's. The tables of the applications blocked since the last
+    look are given back to be emptied first: what went into them while they were not blocked went in on a name
+    alone. ({application: table}, [tables to empty])."""
     mono = time.monotonic() if mono is None else mono
     found = tables.policy(state.conf, aliases)
     blocked = {app: entry['table'] for app, entry in found.items()}
@@ -522,11 +525,18 @@ def block(state, aliases, mono=None, pf=None):
     changed = found != state.policy
     state.policy, state.blocking = found, blocked
     state.where.ensure(found, pf or tables.Pf())
+    held_now = state.where.digest()
+    changed = changed or held_now != state.where_held
+    state.where_held = held_now
     kept = []
     for conn in state.to_cut:
         hit = cut_as(state, str(conn.get('name') or conn.get('app') or ''), str((conn.get('client') or [''])[0]))
         if hit is not None:
-            kept.append(dict(conn, app=hit[0], rule=hit[1]))
+            again = dict(conn, app=hit[0], rule=hit[1])
+            if changed or hit[0] != conn.get('app'):
+                # shared with another application or not is a question of whom each block reaches: asked again
+                again['alone'] = shared(state, str((conn.get('server') or [''])[0]), mono, hit[0])
+            kept.append(again)
     if len(kept) != len(state.to_cut):
         state.totals['cut_unblocked'] += len(state.to_cut) - len(kept)
     state.to_cut = kept
@@ -1188,7 +1198,7 @@ def reread(state, config, catalogue_path, pf=None):
     state.conf = conf
     pf = pf or tables.Pf()
     aliases = tables.present(config)
-    state.devices = tables.interface_devices(config)
+    read_devices(state, config)
     state.where.refresh(tables.policy(conf, aliases), state.devices, state.network.by_dev, pf)
     _blocked, emptied = block(state, aliases, pf=pf)
     say_unread(state)
@@ -1196,6 +1206,16 @@ def reread(state, config, catalogue_path, pf=None):
     log('Application Control: settings read again: %d application(s) blocked, %d by block rules of the Rules tab'
         % (len(state.blocking), sum(1 for found in state.policy.values() if found['rules'])))
     return emptied
+
+
+def read_devices(state, config):
+    """The interfaces of config.xml and their devices, read again into the state - the last read kept when config.xml
+    cannot be read now, as the firewall's addresses are (network()): an interface's name is never taken for an
+    alias's for a window."""
+    found = tables.interface_devices(config)
+    if found is not None:
+        state.devices = found
+    return state.devices
 
 
 def say_unread(state, now=None):
@@ -1293,7 +1313,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
             unread[0] = True
             state.fail('the firewall\'s own addresses could not be read (%s -a): no server goes into a table '
                        'until they are' % ifconfig, t)
-        state.devices = tables.interface_devices(config)
+        read_devices(state, config)
         state.where.refresh(state.policy, state.devices, state.network.by_dev, pf)
         say_unread(state, t)
 

@@ -481,12 +481,13 @@ def save(path, data):
 
 
 def entries(path=None):
-    """The servers dropped in hardware written down: [{'app', 'server'}], the oldest first."""
+    """The servers dropped in hardware written down: [{'app', 'rule', 'server'}], the oldest first - rule the block it
+    was dropped for, '' for every device (Blocked applications, and a row written before rules were)."""
     found = load(path or DROPPED, {})
     rows = found.get('dropped') if isinstance(found, dict) else None
     if not isinstance(rows, list):
         return []
-    return [{'app': str(r['app']), 'server': str(r['server'])} for r in rows
+    return [{'app': str(r['app']), 'rule': str(r.get('rule') or ''), 'server': str(r['server'])} for r in rows
             if isinstance(r, dict) and r.get('server') and r.get('app')]
 
 
@@ -502,18 +503,18 @@ def keep(rows, path=None):
             pass
 
 
-def write_down(pairs, path=None):
-    """(application, server) pairs dropped in hardware added to what is written down - each once, the latest
-    last - under the lock. A problem, or None."""
+def write_down(triples, path=None):
+    """(application, rule, server) dropped in hardware added to what is written down - each once, the latest last -
+    under the lock. A problem, or None."""
     path = path or DROPPED
     handle = locked(wait=WAIT)
     if handle is None:
         return '%s could not be written: another held it for %d s' % (path, WAIT)
     with handle:
-        new = sorted(pairs)
+        new = sorted(triples)
         again = set(new)
-        rows = [r for r in entries(path) if (r['app'], r['server']) not in again]
-        rows.extend({'app': app, 'server': server} for app, server in new)
+        rows = [r for r in entries(path) if (r['app'], r['rule'], r['server']) not in again]
+        rows.extend({'app': app, 'rule': rule, 'server': server} for app, rule, server in new)
         try:
             keep(rows, path)
         except OSError as error:
@@ -624,7 +625,7 @@ def cut(conns, now=None, ask=None, config=None, policy=None):
     if dropped == UNKNOWN or (isinstance(dropped, int) and dropped > 0):
         # which of them the coprocessor dropped is not said, only how many: each server is written down - at
         # once, so a release meanwhile counts it as held by an application still blocked
-        problem = write_down({(conns_read[i].app, conns_read[i].server[0]) for i in set(cuts.values())})
+        problem = write_down({(conns_read[i].app, conns_read[i].rule, conns_read[i].server[0]) for i in set(cuts.values())})
         if problem:
             summary['errors'].append(problem)
     by_conn = {}
@@ -655,11 +656,24 @@ def cut(conns, now=None, ask=None, config=None, policy=None):
     return summary
 
 
+def still_drops(row, found):
+    """Whether what was dropped for a row's block is to stay dropped, by policy() as Apply leaves it: its application
+    blocked for every device when the row's rule is '' (Blocked applications), else that rule there still, a block of
+    its application. Whom a rule's source holds now is not known here - a row names no device - so a source narrowed
+    hands nothing back; the rule removed, switched off or no longer a block does."""
+    entry = found.get(row['app'])
+    if entry is None:
+        return False
+    if not row['rule']:
+        return entry['everyone']
+    return any(rule['uuid'] == row['rule'] for rule in entry['rules'])
+
+
 def release(config=None):
-    """Hand back from hardware the connections dropped for an application no longer blocked
-    (tables.blocked()), by their servers, less a server an application still blocked holds - holding the
-    lock on what is written down meanwhile. The summary: handed back (a count, UNKNOWN or None), servers
-    still written down, errors."""
+    """Hand back from hardware the connections dropped for a block that no longer stands - an application no
+    longer blocked, or the rule they were dropped for removed while another still blocks it (still_drops()) - by
+    their servers, less a server a block still standing holds - holding the lock on what is written down
+    meanwhile. The summary: handed back (a count, UNKNOWN or None), servers still written down, errors."""
     config = config or CONFIG
     summary = {'released': None, 'kept': 0, 'errors': []}
     handle = locked(wait=WAIT)
@@ -675,8 +689,9 @@ def release(config=None):
         if not conf['read']:
             summary['errors'].append('%s could not be read: nothing handed back' % config)
             return summary
-        still = set(tables.blocked(conf, tables.present(config)))
-        gone = [r for r in rows if r['app'] not in still]
+        blocking = tables.policy(conf, tables.present(config))
+        standing = [still_drops(r, blocking) for r in rows]
+        gone = [r for r, stands in zip(rows, standing) if not stands]
         if not gone:
             return summary
         found, _hw = hardware()
@@ -685,7 +700,7 @@ def release(config=None):
                                      % ('has no release_addresses() - too old' if found == 'old'
                                         else 'could not be loaded'))
             return summary
-        held = {r['server'] for r in rows if r['app'] in still}
+        held = {r['server'] for r, stands in zip(rows, standing) if stands}
         addresses = {r['server'] for r in gone} - held
         released = None if found == 'absent' else release_in_hardware(addresses) if addresses else 0
         summary['released'] = released
@@ -694,7 +709,7 @@ def release(config=None):
                                      'release' % RELEASE_DEADLINE)
             return summary
         # handed back - or os-xgs-npu gone since, with nothing in hardware to hand back: let go
-        rows = [r for r in rows if r['app'] in still]
+        rows = [r for r, stands in zip(rows, standing) if stands]
         try:
             keep(rows)
         except OSError as error:

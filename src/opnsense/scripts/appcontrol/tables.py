@@ -317,11 +317,12 @@ def digest(rule):
 
 def interface_devices(path=CONFIG):
     """{interface: its device} of every interface in config.xml - lan: em1, opt2: vlan02 - the names a rule's
-    source takes for an interface's network."""
+    source takes for an interface's network; None when config.xml cannot be read, so a caller keeps what it last
+    read rather than take an interface's name for an alias's."""
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError):
-        return {}
+        return None
     found = root.find('interfaces')
     out = {}
     for node in (list(found) if found is not None else []):
@@ -503,11 +504,12 @@ class Where:
     def __init__(self):
         self.held = {}          # element -> 'any', a tables.Held, or None when it could not be read
         self.unread = {}        # element -> why
+        self.seen = {}          # element -> what it held as resolved, for digest()
         self.devices = {}
         self.by_dev = {}
 
     def refresh(self, policy, devices, by_dev, pf):
-        self.held, self.unread, self.devices, self.by_dev = {}, {}, devices, by_dev
+        self.held, self.unread, self.seen, self.devices, self.by_dev = {}, {}, {}, devices, by_dev
         self.ensure(policy, pf)
 
     def ensure(self, policy, pf):
@@ -517,6 +519,8 @@ class Where:
                     if element in self.held:
                         continue
                     kind, value = resolve(element, self.devices, self.by_dev, pf)
+                    self.seen[element] = (kind, sorted('%s%s' % ('!' if inverted else '', net) for net, inverted in value)
+                                          if kind == 'nets' else value)
                     if kind == 'any':
                         self.held[element] = 'any'
                     elif kind == 'nets':
@@ -524,6 +528,11 @@ class Where:
                     else:
                         self.held[element] = None
                         self.unread[element] = value
+
+    def digest(self):
+        """What every element resolved holds, as a short digest: a source that gained or lost a device - an alias
+        whose table changed, an interface's new prefix - changes it."""
+        return hashlib.sha1(json.dumps(sorted(self.seen.items())).encode('utf-8')).hexdigest()
 
     def holds(self, rule, address):
         """Whether a device's address is one of a rule's source: in one of its elements, or - inverted - in

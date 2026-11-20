@@ -2138,6 +2138,40 @@ classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
 check('the same, GMail blocked for the LAN alone - let through for the guests: taken out', fake.held['appcontrol_YouTube'],
       set())
 
+# what waits, cut another way now: whether its server is shared asked again for the application it is cut as
+state = rules_state(GUEST_YT)
+classify.apply(state, [gm_rec, guest_rec], tables.Pf(run=FakePf()), GMAIL, T0 + 70, T0 + 70)
+before = [(c['app'], c['alone']) for c in state.to_cut]
+state.conf = dict(state.conf, rules=[dict(number=1, uuid=R4, enabled=True, action='block', app='TLS', source=['opt2'],
+                                          description='', **{'not': False})])
+classify.block(state, GMAIL, T0 + 80, tables.Pf(run=FakePf()))
+check('a guest\'s connection waiting as YouTube - its server named GMail too, not blocked: alone - then YouTube\'s rule '
+      'gone and TLS blocked for the guests: cut as TLS, and its server no longer alone - TLS\'s block reaches every guest '
+      'GMail\'s name would', (before, [(c['app'], c['alone']) for c in state.to_cut]), ([('YouTube', True)], [('TLS', False)]))
+
+# a source that gains a device: what is remembered looked at again for it
+kids_pf = FakePf({'Kids': {'192.0.2.50'}})
+state = rules_state([{'uuid': R1, 'app': 'YouTube', 'source': ['Kids']}])
+classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=kids_pf), RULE_ALIASES,
+               T0 + 70, T0 + 70)
+queued_before = len(state.to_cut)
+kids_pf.held['Kids'].add('192.0.2.10')
+state.where.refresh(state.policy, DEVICES, BY_DEV, tables.Pf(run=kids_pf))       # as each window's close reads it
+classify.block(state, RULE_ALIASES, T0 + 80, tables.Pf(run=kids_pf))
+check('an alias of a rule\'s source that gains a device - a hostname resolved again: the connection of that device '
+      'remembered is cut now, not only its new ones', (queued_before, [(c['client'][0], c['rule']) for c in state.to_cut],
+                                                       len(state.remembered)), (0, [('192.0.2.10', R1)], 0))
+
+# config.xml not to be read for a moment: the interfaces as last read
+with tempfile.TemporaryDirectory() as tmp:
+    state = rules_state([])
+    broken = os.path.join(tmp, 'config.xml')
+    with open(broken, 'w') as handle:
+        handle.write('<opnsense')
+    check('config.xml not to be read at a window\'s close: the interfaces kept as last read - an interface\'s name never '
+          'taken for an alias\'s, no "pf holds no table lan"', (classify.read_devices(state, broken), tables.interface_devices(
+              broken)), (DEVICES, None))
+
 # the rules change: what waits for a cut, and what is remembered, looked at again
 state = rules_state(GUEST_YT)
 classify.apply(state, [guest_rec, ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()),
