@@ -10,8 +10,9 @@
  *
  * What is checked: a source any, an interface's network, an alias, an address, several of them, or one
  * inverted, taken; any with others, an inverted source of more than one item or of any, the firewall itself,
- * an address of one of its interfaces and a table of this plugin's, refused - each on the field it is about,
- * the rule's own reference; only the rules changed, unless the whole model is validated.
+ * an address of one of its interfaces - by its name, or written by hand as config.xml gives it one, a virtual
+ * IP's among them - and a table of this plugin's, refused - each on the field it is about, the rule's own
+ * reference; only the rules changed, unless the whole model is validated.
  *
  *   php tools/test-model.php
  */
@@ -60,14 +61,17 @@ namespace OPNsense\Core {
             return new self();
         }
 
+        /* config.xml's interfaces - the WAN's address from upstream, the LAN's written there, IPv6 by tracking, the
+           guests' IPv6 written - and a virtual IP on the LAN */
         public function object()
         {
             return (object)['interfaces' => new class {
                 public function children()
                 {
-                    return ['wan' => (object)[], 'lan' => (object)[], 'opt2' => (object)[]];
+                    return ['wan' => (object)['ipaddr' => 'dhcp'], 'lan' => (object)['ipaddr' => '192.168.1.1',
+                        'ipaddrv6' => 'track6'], 'opt2' => (object)['ipaddrv6' => '2001:db8:2::1']];
                 }
-            }];
+            }, 'virtualip' => (object)['vip' => [(object)['subnet' => '192.168.1.3'], (object)['subnet' => '']]]];
         }
     }
 }
@@ -120,6 +124,20 @@ namespace {
         ['source', 'appcontrol_YouTube is a table of this plugin\'s: it holds servers, not devices.']],
         'the firewall itself, an address of one of its interfaces, a table of this plugin\'s: refused; a name ending in ip ' .
         'that is no interface\'s address left to OPNsense\'s own check');
+
+    $own = Rules::ownAddresses(\OPNsense\Core\Config::getInstance()->object());
+    check($own === ['192.168.1.1', '2001:db8:2::1', '192.168.1.3'],
+        'the addresses config.xml gives the firewall: its interfaces\' written there - not dhcp nor track6 - and its virtual IPs\'');
+    check(array_map(function ($s) use ($interfaces, $own) {
+        return Rules::sourceProblems($s, false, $interfaces, $own);
+    }, ['192.168.1.1', '192.168.1.1/32', '192.168.1.3', '2001:db8:2::1/128', '192.168.1.0/24', '192.168.1.10',
+        '2001:db8:2::/64']) === [
+        [['source', '192.168.1.1 is the firewall itself, not a device connecting through it.']],
+        [['source', '192.168.1.1/32 is the firewall itself, not a device connecting through it.']],
+        [['source', '192.168.1.3 is the firewall itself, not a device connecting through it.']],
+        [['source', '2001:db8:2::1/128 is the firewall itself, not a device connecting through it.']], [], [], []],
+        'an address of the firewall\'s own written by hand - an interface\'s, a virtual IP\'s, alone or as a network of one: ' .
+        'refused as the firewall itself; a network holding one, and another address, taken');
 
     function item($uuid, $source, $inverted, $changed)
     {
@@ -178,13 +196,16 @@ namespace {
             yield 'r2' => item('r2', 'lan,opt2', true, true);
             yield 'r3' => item('r3', 'opt2', false, true);
             yield 'r4' => item('r4', 'any,lan', false, false);
+            yield 'r5' => item('r5', '192.168.1.3', false, true);
         }
     }];
     check($model->performValidation()->all === [
         ['rules.rule.r1.source', '(self) is the firewall itself, not a device connecting through it.'],
-        ['rules.rule.r2.source_not', 'Inverting sources is only allowed for single targets to avoid mis-interpretations']],
-        'the model: each refusal on its rule\'s own field; a rule unchanged not looked at');
-    check(count($model->performValidation(true)->all) === 3, 'the whole model validated: the unchanged rule looked at too');
+        ['rules.rule.r2.source_not', 'Inverting sources is only allowed for single targets to avoid mis-interpretations'],
+        ['rules.rule.r5.source', '192.168.1.3 is the firewall itself, not a device connecting through it.']],
+        'the model: each refusal on its rule\'s own field - a virtual IP of config.xml\'s written by hand among them; a rule ' .
+        'unchanged not looked at');
+    check(count($model->performValidation(true)->all) === 4, 'the whole model validated: the unchanged rule looked at too');
 
     echo $failed ? "$failed of $checks checks failed\n" : "$checks checks passed\n";
     exit($failed ? 1 : 0);
