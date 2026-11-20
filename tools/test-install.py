@@ -39,6 +39,8 @@ SCRIPTS = ['install/install.sh', 'install/uninstall.sh', 'install/enable.sh', 'p
            'src/opnsense/scripts/appcontrol/tables.py', 'src/etc/rc.d/appcontrol']
 LOCAL = '/usr/local'
 MENU = '/usr/local/opnsense/mvc/app/models/OPNsense/AppControl/Menu/Menu.xml'
+SURICATA_TEMPLATE = '/usr/local/opnsense/service/templates/OPNsense/AppControl/appcontrol.rules'
+SURICATA_RULES = '/usr/local/etc/suricata/rules/appcontrol.rules'
 XGS = '/usr/local/opnsense/mvc/app/models/OPNsense/XGS/Menu/Menu.xml'
 HOOK = '/usr/local/etc/inc/plugins.inc.d/appcontrol.inc'
 RC = '/usr/local/etc/rc.d/appcontrol'
@@ -98,7 +100,11 @@ class Box:
                 handle.write(text)
         hook = self.fake + HOOK
         log = self.calls
-        self.stub('configctl', 'echo "configctl $* hook=$([ -f %s ] && echo yes || echo no)" >> %s\necho OK' % (hook, log))
+        # configctl appcontrol suricata answers that the rules file changed while the file tmp/suricata-changed is there
+        self.changed = os.path.join(tmp, 'suricata-changed')
+        self.stub('configctl', 'echo "configctl $* hook=$([ -f %s ] && echo yes || echo no)" >> %s\n'
+                               'if [ "$*" = "appcontrol suricata" ] && [ -f %s ]; then echo \'{"status": "ok", "changed": true}\'; '
+                               'else echo OK; fi' % (hook, log, self.changed))
         self.stub('service', 'echo "service $*" >> %s' % log)
         self.stub('mktemp', 'if [ "$1" = -d ] && [ "$2" = -t ]; then exec /usr/bin/env mktemp -d '
                             '"${TMPDIR:-/tmp}/$3.XXXXXX"; fi\nexec /usr/bin/env mktemp "$@"', real='mktemp')
@@ -253,17 +259,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check('install.sh: every file of src/ laid down, and nothing else', laid, source_files())
     check('install.sh: the menu file placed, the caches cleared', (box.read(MENU), [c for c in CACHES if os.path.exists(box.fake + c)]),
           (menu_own, []))
-    check('install.sh: configd restarted, then the aliases, the filter, cron, and the classifier started',
+    check('install.sh: configd restarted, then the aliases, the filter, cron, the Suricata rules of the Rules tab - '
+          'unchanged, so no reload of the Intrusion Detection - and the classifier started',
           box.called('configctl') + box.called('service'),
           ['configctl appcontrol apply hook=yes', 'configctl filter reload skip_alias hook=yes',
-           'configctl cron restart hook=yes', 'configctl appcontrol restart hook=yes', 'service configd restart'])
+           'configctl cron restart hook=yes', 'configctl appcontrol suricata hook=yes', 'configctl appcontrol restart hook=yes',
+           'service configd restart'])
     check('install.sh: the modes', [box.mode(p) for p in (
         '/usr/local/opnsense/scripts/appcontrol/classify.py', '/usr/local/opnsense/scripts/appcontrol/aliases.php',
         '/usr/local/opnsense/scripts/appcontrol/place-menu.sh', RC, HOOK,
         '/usr/local/opnsense/service/conf/actions.d/actions_appcontrol.conf',
         '/usr/local/opnsense/scripts/appcontrol/categories.json', '/usr/local/opnsense/scripts/appcontrol/i18n/ui/source.json',
-        '/usr/local/opnsense/scripts/appcontrol/release-keys/xgs-release-key-13ed7f86.pub')],
-        [0o755, 0o755, 0o755, 0o755, 0o644, 0o644, 0o644, 0o644, 0o644])
+        '/usr/local/opnsense/scripts/appcontrol/release-keys/xgs-release-key-13ed7f86.pub',
+        '/usr/local/opnsense/scripts/appcontrol/suricata_rules.py', SURICATA_TEMPLATE)],
+        [0o755, 0o755, 0o755, 0o755, 0o644, 0o644, 0o644, 0o644, 0o644, 0o755, 0o644])
+    box.write(box.changed, '')
+    box.forget()
+    rc, out = box.run('install/install.sh')
+    check('install.sh, the Suricata rules changed: the Intrusion Detection\'s rules installed again and Suricata told, before '
+          'the classifier', box.called('configctl')[3:6],
+          ['configctl appcontrol suricata hook=yes', 'configctl ids reload hook=yes', 'configctl appcontrol restart hook=yes'])
+    os.remove(box.changed)
     check('install.sh: the state directory, 0750', box.mode(STATE), 0o750)
     installed = box.read('/usr/local/share/os-appcontrol/installed.json') or ''
     check('install.sh: the commit recorded for the self-update, and that it installed ndpi',
@@ -276,10 +292,12 @@ with tempfile.TemporaryDirectory() as tmp:
     os.remove(box.fake + '/usr/local/share/os-appcontrol/ndpi-installed')
     box.forget()
     rc, out = box.run('install/install.sh')
-    check('install.sh again, classifying off: XGS > Application Control, the classifier stopped, ndpi left as it is',
+    check('install.sh again, classifying off: XGS > Application Control, the Suricata rules as Apply has them, the '
+          'classifier stopped, ndpi left as it is',
           (rc, out.strip().splitlines()[-1:], box.called('configctl appcontrol'), box.called('pkg')),
           (0, ['Application Control installed: XGS > Application Control (classifying is off in Settings)'],
-           ['configctl appcontrol apply hook=yes', 'configctl appcontrol stop hook=yes'], ['pkg info -e ndpi']))
+           ['configctl appcontrol apply hook=yes', 'configctl appcontrol suricata hook=yes', 'configctl appcontrol stop hook=yes'],
+           ['pkg info -e ndpi']))
     check('install.sh again: ndpi there before, so not marked as installed by it',
           os.path.exists(box.fake + '/usr/local/share/os-appcontrol/ndpi-installed'), False)
 
@@ -374,6 +392,19 @@ with tempfile.TemporaryDirectory() as tmp:
           box.called('pfctl -t'), ['pfctl -t appcontrol_cat_Gone -T kill'])
     check('uninstall.sh: ndpi left, as it was there before', (box.called('pkg'), rc, out.strip().splitlines()[-1]),
           ([], 0, 'Application Control removed; its settings stay in config.xml'))
+    check('uninstall.sh, no Suricata rules of the Rules tab: the Intrusion Detection left alone', box.called('configctl ids'), [])
+
+    # the Suricata rules of the Rules tab there: taken out of the Intrusion Detection's local rules, which are installed again
+    box.run('install/install.sh')
+    box.write(box.fake + SURICATA_RULES, '# rules\n')
+    box.write(box.fake + SURICATA_RULES + '.new', '# half written\n')
+    box.forget()
+    rc, out = box.run('install/uninstall.sh')
+    check('uninstall.sh, the Suricata rules there: removed, the half-written one too, then the Intrusion Detection\'s rules '
+          'installed again and Suricata told, after the hand-back',
+          (os.path.exists(box.fake + SURICATA_RULES), os.path.exists(box.fake + SURICATA_RULES + '.new'),
+           box.called('configctl')[1:3], box.plugin_files()),
+          (False, False, ['configctl appcontrol release hook=yes', 'configctl ids reload hook=yes'], []))
 
     # install.sh, ndpi not there; uninstall.sh removes it only when nothing needs it
     os.remove(os.path.join(box.pkgdb, 'ndpi'))
@@ -415,25 +446,39 @@ with tempfile.TemporaryDirectory() as tmp:
     check('post-install.sh: the menu placed, the classifier started, said', (rc, box.read(MENU) == menu_own,
           out.strip().splitlines()[-1]), (0, True, 'Application Control installed: the page is at Firewall > Application Control '
                                                    '(classifying)'))
-    check('post-install.sh: configd, then the aliases, the filter, cron and the classifier', box.called('configctl') +
-          box.called('service'), ['configctl appcontrol apply hook=yes', 'configctl filter reload skip_alias hook=yes',
-                                  'configctl cron restart hook=yes', 'configctl appcontrol restart hook=yes',
-                                  'service configd restart'])
+    check('post-install.sh: configd, then the aliases, the filter, cron, the Suricata rules and the classifier',
+          box.called('configctl') + box.called('service'),
+          ['configctl appcontrol apply hook=yes', 'configctl filter reload skip_alias hook=yes', 'configctl cron restart hook=yes',
+           'configctl appcontrol suricata hook=yes', 'configctl appcontrol restart hook=yes', 'service configd restart'])
     check('post-install.sh: the state directory', box.mode(STATE), 0o750)
+    box.write(box.changed, '')
+    box.forget()
+    box.run('pkg/post-install.sh')
+    check('post-install.sh, the Suricata rules changed: the Intrusion Detection\'s rules installed again, Suricata told',
+          box.called('configctl')[3:5], ['configctl appcontrol suricata hook=yes', 'configctl ids reload hook=yes'])
+    os.remove(box.changed)
     box.config(OFF)
     box.forget()
     rc, out = box.run('pkg/post-install.sh')
     check('post-install.sh, classifying off: the classifier stopped', box.called('configctl appcontrol'),
-          ['configctl appcontrol apply hook=yes', 'configctl appcontrol stop hook=yes'])
+          ['configctl appcontrol apply hook=yes', 'configctl appcontrol suricata hook=yes', 'configctl appcontrol stop hook=yes'])
     box.write(box.fake + RC, '#!/bin/sh\necho "rc.d appcontrol $*" >> %s\n' % box.calls, 0o755)
+    box.write(box.fake + SURICATA_RULES, '# rules\n')
     box.forget()
     rc, out = box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': 'true'})
-    check('pre-deinstall.sh in an upgrade: nothing done', (rc, box.called()), (0, []))
+    check('pre-deinstall.sh in an upgrade: nothing done - the Suricata rules left too', (rc, box.called(),
+                                                                                       os.path.exists(box.fake + SURICATA_RULES)),
+          (0, [], True))
     rc, out = box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': ''})
     check('pre-deinstall.sh in a removal: the classifier stopped, its tmpfs taken down, then the aliases taken out and, with '
-          'no application blocked, what was dropped in hardware handed back - while the hook and cut.py are there', box.called(),
-          ['rc.d appcontrol onestop', 'pkill -f daemon: [a]ppcontrol\\[', 'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake,
-           'umount -f %s' % (box.fake + WORK), 'configctl appcontrol remove hook=yes', 'configctl appcontrol release hook=yes'])
+          'no application blocked, what was dropped in hardware handed back - while the hook and cut.py are there - and the '
+          'Suricata rules of the Rules tab taken out of the Intrusion Detection\'s', (box.called(),
+                                                                                    os.path.exists(box.fake + SURICATA_RULES)),
+          (['rc.d appcontrol onestop', 'pkill -f daemon: [a]ppcontrol\\[',
+            'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake, 'umount -f %s' % (box.fake + WORK),
+            'configctl appcontrol remove hook=yes', 'configctl appcontrol release hook=yes', 'configctl ids reload hook=yes'],
+           False))
+    box.write(box.fake + SURICATA_RULES, '# rules\n')
     os.makedirs(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__', exist_ok=True)
     box.write(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__/classify.cpython-311.pyc', 'x')
     for path in source_files():
@@ -443,10 +488,11 @@ with tempfile.TemporaryDirectory() as tmp:
     rc, out = box.run('pkg/post-deinstall.sh')
     check('post-deinstall.sh: nothing of the plugin left - the menu file, Python\'s caches, the state, the pidfile',
           box.plugin_files(), [])
-    check('post-deinstall.sh: configd, the filter and cron, the table of an alias gone taken out of pf',
+    check('post-deinstall.sh: configd, the Suricata rules pre-deinstall left - taken out, the Intrusion Detection\'s rules '
+          'installed again - the filter and cron, the table of an alias gone taken out of pf',
           box.called('service') + [c for c in box.called('configctl')] + box.called('pfctl -t'),
-          ['service configd restart', 'configctl filter reload skip_alias hook=no', 'configctl cron restart hook=no',
-           'pfctl -t appcontrol_cat_Gone -T kill', 'pfctl -t appcontrol_cat_Web -T kill'])
+          ['service configd restart', 'configctl ids reload hook=no', 'configctl filter reload skip_alias hook=no',
+           'configctl cron restart hook=no', 'pfctl -t appcontrol_cat_Gone -T kill', 'pfctl -t appcontrol_cat_Web -T kill'])
     check('post-deinstall.sh: the window files\' tmpfs taken down before the state goes', box.called('umount'),
           ['umount -f %s' % (box.fake + WORK)])
 

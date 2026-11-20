@@ -35,13 +35,17 @@ if [ -x /usr/local/opnsense/scripts/appcontrol/place-menu.sh ]; then
 fi
 
 # On by default (the plan's svc-5-07), so the page's Apply is done here: the aliases, the filter so pf
-# holds their tables, cron so their Expire runs, and the classifier - started again on an upgrade, so
-# it runs the new code. Off in Settings, it is stopped.
+# holds their tables, cron so their Expire runs, the Suricata rules of the Rules tab - the Intrusion
+# Detection's rules installed again when they changed - and the classifier, started again on an
+# upgrade, so it runs the new code. Off in Settings, it is stopped.
 STATE=
 if [ -f /usr/local/sbin/configctl ]; then
 	/usr/local/sbin/configctl appcontrol apply > /dev/null 2>&1 || true
 	/usr/local/sbin/configctl filter reload skip_alias > /dev/null 2>&1 || true
 	/usr/local/sbin/configctl cron restart > /dev/null 2>&1 || true
+	if /usr/local/sbin/configctl appcontrol suricata 2> /dev/null | grep -q '"changed": true'; then
+		/usr/local/sbin/configctl ids reload > /dev/null 2>&1 || true
+	fi
 	if /usr/local/bin/python3 /usr/local/opnsense/scripts/appcontrol/tables.py wanted 2> /dev/null | grep -q '"classify": true'; then
 		/usr/local/sbin/configctl appcontrol restart > /dev/null 2>&1 || true
 		STATE=" (classifying)"

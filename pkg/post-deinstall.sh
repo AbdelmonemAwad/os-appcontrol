@@ -31,9 +31,16 @@ rm -f /var/lib/php/tmp/opnsense_menu_cache.xml /tmp/opnsense_menu_cache.xml
 /sbin/umount -f /var/db/os-appcontrol/work 2> /dev/null || true
 rm -rf /usr/local/opnsense/scripts/appcontrol/__pycache__ /var/db/os-appcontrol
 rm -f /var/run/appcontrol.pid /var/run/appcontrol.daemon.pid
-for d in /usr/local/opnsense/scripts/appcontrol /usr/local/opnsense/mvc/app/library/OPNsense/AppControl; do
+for d in /usr/local/opnsense/scripts/appcontrol /usr/local/opnsense/mvc/app/library/OPNsense/AppControl \
+    /usr/local/opnsense/service/templates/OPNsense/AppControl; do
 	[ -d "${d}" ] && find "${d}" -depth -type d -empty -delete 2> /dev/null
 done
+
+# The Suricata rules of the Rules tab, should pre-deinstall not have taken them out: no file of the package's.
+if [ -f /usr/local/etc/suricata/rules/appcontrol.rules ]; then
+	rm -f /usr/local/etc/suricata/rules/appcontrol.rules /usr/local/etc/suricata/rules/appcontrol.rules.new
+	[ -f /usr/local/sbin/configctl ] && /usr/local/sbin/configctl ids reload > /dev/null 2>&1 || true
+fi
 
 [ -f /usr/local/sbin/configctl ] && /usr/local/sbin/configctl filter reload skip_alias > /dev/null 2>&1 || true
 [ -f /usr/local/sbin/configctl ] && /usr/local/sbin/configctl cron restart > /dev/null 2>&1 || true
