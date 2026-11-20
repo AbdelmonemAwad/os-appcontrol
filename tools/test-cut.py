@@ -597,6 +597,11 @@ with tempfile.TemporaryDirectory() as tmp:
           'server the other rule\'s drops hold - its rows let go, the other\'s kept',
           (calls(log), summary['released'], [(r['rule'][-1], r['server']) for r in cut.entries()]),
           (['hwdrop release_addresses ["198.51.100.40"]'], 1, [('b', '198.51.100.41')]))
+    cut.keep([{'app': 'TikTok', 'rule': RULE_A, 'server': '198.51.100.42'}])
+    log = setup(tmp)
+    summary = cut.release(config(tmp, blocked='TikTok', apps=('TikTok',)))
+    check('the rule removed, its application blocked for every device since: nothing handed back - it would be cut for '
+          'every device anyway', (calls(log), summary['released'], len(cut.entries())), ([], None, 1))
 
 # ------------------------------------------------------------------------------------------- the command line
 

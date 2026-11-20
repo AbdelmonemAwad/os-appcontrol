@@ -658,15 +658,15 @@ def cut(conns, now=None, ask=None, config=None, policy=None):
 
 def still_drops(row, found):
     """Whether what was dropped for a row's block is to stay dropped, by policy() as Apply leaves it: its application
-    blocked for every device when the row's rule is '' (Blocked applications), else that rule there still, a block of
-    its application. Whom a rule's source holds now is not known here - a row names no device - so a source narrowed
-    hands nothing back; the rule removed, switched off or no longer a block does."""
+    blocked for every device now, or the row's rule there still, a block of its application. Whom a rule's source
+    holds now is not known here - a row names no device - so a source narrowed hands nothing back; the rule
+    removed, switched off or no longer a block does, unless its application is blocked for every device since."""
     entry = found.get(row['app'])
     if entry is None:
         return False
-    if not row['rule']:
-        return entry['everyone']
-    return any(rule['uuid'] == row['rule'] for rule in entry['rules'])
+    if entry['everyone']:
+        return True
+    return bool(row['rule']) and any(rule['uuid'] == row['rule'] for rule in entry['rules'])
 
 
 def release(config=None):

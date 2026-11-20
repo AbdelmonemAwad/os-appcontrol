@@ -792,10 +792,11 @@ before the fixes:
   since; the Intrusion Detection's interfaces and whether one is internal; an interface group's networks; a
   connection cut another way asked again whether its server is shared; an alias that gains a device; the
   interfaces kept when config.xml cannot be read; an empty switch read as PHP reads it;
-- **the cut** - `tools/test-cut.py`, 70 checks now: judged by the classifier's policy - a rule switched off and
+- **the cut** - `tools/test-cut.py`, 71 checks now: judged by the classifier's policy - a rule switched off and
   not applied still cutting, one not applied not - with its rule's source resolved again, another rule of its
   application taking it, a change while the run goes judged before the kills; what is dropped written down
-  with its rule, and a rule removed while another blocks its application handing back what no block holds;
+  with its rule, and a rule removed while another blocks its application handing back what no block holds -
+  nothing when the application is blocked for every device since;
 - **the model and the page's API** - `tools/test-model.php`, 9 checks, and `tools/test-mvc.php`, 29: an
   address config.xml gives the firewall, written by hand, refused as the firewall itself; the selector's
   labels escaped; the lines Suricata refused passed to the grid;
