@@ -28,6 +28,7 @@ rm -f /usr/local/etc/inc/plugins.inc.d/appcontrol.inc
 rm -f /usr/local/etc/rc.d/appcontrol
 rm -rf /usr/local/share/os-appcontrol
 rm -f /usr/local/opnsense/service/conf/actions.d/actions_appcontrol.conf
+rm -rf /usr/local/opnsense/service/templates/OPNsense/AppControl
 rm -rf /usr/local/opnsense/scripts/appcontrol
 # the menu file place-menu.sh wrote, which is not one of src/'s files
 rm -f /usr/local/opnsense/mvc/app/models/OPNsense/AppControl/Menu/Menu.xml
