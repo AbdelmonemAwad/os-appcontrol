@@ -32,11 +32,13 @@ the name it carried - the server name of TLS or QUIC, HTTP's Host - and:
   a packet on to look like it, and a clock that steps changes neither. Not by address: another
   application on the same server is not cut (settled point 5, option a).
 
-A connection whose application is no longer blocked when the run begins (tables.blocked()) is left, and
-counted. The kills stop once the run has had BUDGET seconds, before classify.py's own limit: the
-connections not reached are given back in the summary (left), and classify.py queues them again. The
-states are looked up by their ends (to_cut()), so a run of 5,000 connections against 100,000 states is
-one pass over each.
+A connection whose application is no longer blocked when the run begins is left, and counted: one cut for
+every device (Blocked applications) when that application is blocked so no more, one cut for a block rule
+of the Rules tab when that rule is gone, switched off or no longer a block of that application
+(tables.policy()). Each cut is counted for its rule. The kills stop once the run has had BUDGET seconds,
+before classify.py's own limit: the connections not reached are given back in the summary (left), and
+classify.py queues them again. The states are looked up by their ends (to_cut()), so a run of 5,000
+connections against 100,000 states is one pass over each.
 
 Cut in hardware too (the plan's settled point 6): where os-xgs-npu is installed, its hwdrop.drop_ends()
 is called before the first state is killed, once a run with the ends of every state being cut, each
@@ -302,22 +304,34 @@ def states(text):
     return out
 
 
-Conn = collections.namedtuple('Conn', 'proto client server began app host alone')
+Conn = collections.namedtuple('Conn', 'proto client server began app host alone rule', defaults=('',))
 
 
 def connection(item):
     """A connection of the file - its protocol's name, its client end, its server end, its first packet on
-    the monotonic clock (or None), its application, the name it carried, and alone: its server kept out of
-    the table whatever the resolver says - or None for one that cannot be read."""
+    the monotonic clock (or None), its application, the name it carried, alone: its server kept out of the
+    table whatever the resolver says, and the block rule it is cut for ('' for Blocked applications) - or
+    None for one that cannot be read."""
     try:
         proto = PROTOCOLS.get(int(item['proto']), str(int(item['proto'])))
         client = (ipaddress.ip_address(item['client'][0]).compressed, int(item['client'][1]))
         server = (ipaddress.ip_address(item['server'][0]).compressed, int(item['server'][1]))
         began = item.get('began')
         return Conn(proto, client, server, None if began is None else float(began), str(item.get('app') or ''),
-                    str(item.get('host') or ''), item.get('alone') is True)
+                    str(item.get('host') or ''), item.get('alone') is True, str(item.get('rule') or ''))
     except (AttributeError, KeyError, IndexError, TypeError, ValueError):
         return None
+
+
+def blocked_still(conn, found):
+    """Whether a connection is still to be cut for what it was queued for, by policy() as it is now: for every
+    device when its rule is '' - its application in Blocked applications - else its block rule there still."""
+    entry = found.get(conn.app)
+    if entry is None:
+        return False
+    if not conn.rule:
+        return entry['everyone']
+    return any(rule['uuid'] == conn.rule for rule in entry['rules'])
 
 
 def to_cut(conns, all_states, now):
@@ -484,7 +498,7 @@ def cut(conns, now=None, ask=None, config=None):
     started = time.monotonic()
     config = config or CONFIG
     summary = {'connections': len(conns), 'cut': 0, 'states': 0, 'dropped': None, 'hardware': None, 'tabled': 0,
-               'alone': 0, 'unblocked': 0, 'left': [], 'apps': {}, 'errors': []}
+               'alone': 0, 'unblocked': 0, 'left': [], 'apps': {}, 'rules': {}, 'errors': []}
     read = [(item, conn) for item, conn in ((item, connection(item)) for item in conns) if conn is not None]
     if len(read) != len(conns):
         summary['errors'].append('%d connection(s) to cut could not be read' % (len(conns) - len(read)))
@@ -494,8 +508,9 @@ def cut(conns, now=None, ask=None, config=None):
     if not conf['read']:
         summary['errors'].append('%s could not be read: nothing cut' % config)
         return summary
-    still = tables.blocked(conf, tables.present(config))
-    kept = [(item, conn) for item, conn in read if conn.app in still]
+    found = tables.policy(conf, tables.present(config))
+    still = {app: entry['table'] for app, entry in found.items()}
+    kept = [(item, conn) for item, conn in read if blocked_still(conn, found)]
     summary['unblocked'] = len(read) - len(kept)
     read = kept
     if not read:
@@ -556,8 +571,9 @@ def cut(conns, now=None, ask=None, config=None):
                 summary['states'] += 1
                 killed.add(i)
     for i in sorted(killed):
-        app = conns_read[i].app
+        app, rule = conns_read[i].app, conns_read[i].rule
         summary['apps'][app] = summary['apps'].get(app, 0) + 1
+        summary['rules'][rule] = summary['rules'].get(rule, 0) + 1
     summary['cut'] = len(killed)
     log('Application Control: %d connection(s) of a blocked application cut, %d pf state(s) killed, %d server(s) '
         'put in their tables, %d connection(s) cut alone%s'

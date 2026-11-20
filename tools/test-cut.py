@@ -248,8 +248,10 @@ check('an endpoint that is not one: none', (cut.endpoint('->'), cut.endpoint('ES
                                             cut.endpoint('192.0.2.1:http')), (None, None, None))
 
 read = [cut.connection(c) for c in CONNS]
-check('a connection read: tcp, its ends, when it began on the monotonic clock, its application, the name it carried',
-      tuple(read[0]), ('tcp', ('192.0.2.10', 50001), ('198.51.100.10', 443), NOW - 40, 'YouTube', 'video.example', False))
+check('a connection read: tcp, its ends, when it began on the monotonic clock, its application, the name it carried, and '
+      'no block rule of the Rules tab - one of Blocked applications',
+      tuple(read[0]), ('tcp', ('192.0.2.10', 50001), ('198.51.100.10', 443), NOW - 40, 'YouTube', 'video.example', False,
+                       ''))
 check('a connection that cannot be read: none', [cut.connection(c) for c in (
     {'proto': 6}, {'proto': 'x', 'client': ['192.0.2.10', 1], 'server': ['198.51.100.1', 2]},
     {'proto': 6, 'client': ['not an address', 1], 'server': ['198.51.100.1', 2]}, 'not a connection')],
@@ -337,6 +339,22 @@ with tempfile.TemporaryDirectory() as tmp:
     check('TikTok no longer blocked when the run begins: its connections left, counted, none of its servers tabled',
           (summary['unblocked'], summary['apps'], kills(calls(log)), summary['tabled']),
           (4, {'YouTube': 1}, ['pfctl -k id -k 00000000000000a1', 'pfctl -k id -k 00000000000000a2'], 1))
+
+    # a block rule of the Rules tab: TikTok blocked from the LAN alone, YouTube for every device
+    RULE = 'bbbbbbbb-0000-4000-8000-000000000001'
+    log = setup(tmp, hwdrop=None)
+    with open(cut.CONFIG, 'w') as handle:
+        handle.write(CONFIG.replace('</AppControl>', '<rules><rule uuid="%s"><enabled>1</enabled><action>block</action>'
+                                                     '<source>lan</source><source_not>0</source_not><app>TikTok</app>'
+                                                     '</rule></rules></AppControl>' % RULE)
+                     % (aliases('YouTube', 'TikTok'), '1', 'YouTube'))
+    ruled = [dict(CONNS[0]), dict(CONNS[1]), dict(CONNS[3], rule=RULE), dict(CONNS[4], rule='gone')]
+    summary = cut.cut(ruled, NOW, ask=ask)
+    check('a connection queued for a block rule of the Rules tab: cut while that rule blocks its application, counted for it; '
+          'one queued for every device whose application only a rule blocks, and one whose rule is gone, left',
+          (summary['cut'], summary['unblocked'], summary['rules'], summary['apps']),
+          (2, 2, {'': 1, RULE: 1}, {'YouTube': 1, 'TikTok': 1}))
+    check('the block rule\'s connection read with its rule', cut.connection(ruled[2]).rule, RULE)
 
     log = setup(tmp)
     EVENTS.result = 3
