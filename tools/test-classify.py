@@ -1824,5 +1824,108 @@ with tempfile.TemporaryDirectory() as tmp:
           'the cut in hardware, said', status.hardware(config, hw), {'cut_in_hardware': False, 'too_old': True})
     check('status.py: pf\'s rules not to be read - none counted', status.stopped_packets(os.path.join(tmp, 'none')), None)
 
+# ================================================================ phase 3: the rules of the Rules tab
+# ------------------------------------------------------------------------------------ the rules read
+RULES_XML = ('<rules>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000001"><enabled>1</enabled><action>block</action><source>opt2</source>'
+             '<source_not>0</source_not><app>YouTube</app><description>no video for guests</description></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000002"><enabled>1</enabled><action>alert</action><source>any</source>'
+             '<source_not>0</source_not><app>NetFlix</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000003"><enabled>0</enabled><action>block</action><source>lan</source>'
+             '<source_not>0</source_not><app>TikTok</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000004"><enabled>1</enabled><action>block</action>'
+             '<source>Teachers</source><source_not>1</source_not><app>TLS</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000005"><enabled>1</enabled><action>pass</action><source>lan</source>'
+             '<source_not>0</source_not><app>DNS</app><description/></rule>'
+             '<rule uuid="aaaaaaaa-0000-4000-8000-000000000006"><enabled>1</enabled><action>block</action><source></source>'
+             '<source_not>0</source_not><app>DNS</app><description/></rule>'
+             '</rules>')
+R1, R2, R3, R4 = ('aaaaaaaa-0000-4000-8000-00000000000%d' % n for n in (1, 2, 3, 4))
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify>1</classify><blocked>NetFlix</blocked></general>'
+                     + RULES_XML + '</AppControl></OPNsense></opnsense>')
+    conf = tables.settings(config)
+    check('settings: the rules of the Rules tab, in their order, numbered from 1, each with its uuid, action, application, '
+          'source split, inverted or not, description',
+          [(r['number'], r['uuid'][-1], r['enabled'], r['action'], r['app'], r['source'], r['not'], r['description'])
+           for r in conf['rules']],
+          [(1, '1', True, 'block', 'YouTube', ['opt2'], False, 'no video for guests'),
+           (2, '2', True, 'alert', 'NetFlix', ['any'], False, ''), (3, '3', False, 'block', 'TikTok', ['lan'], False, ''),
+           (4, '4', True, 'block', 'TLS', ['Teachers'], True, ''), (5, '5', False, 'pass', 'DNS', ['lan'], False, ''),
+           (6, '6', False, 'block', 'DNS', [], False, '')])
+    check('settings: no rules in config.xml - none', tables.settings(os.path.join(tmp, 'none.xml'))['rules'], [])
+cat3 = {'categories': {'5': 'Web'}, 'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TikTok': 'SocialNetwork',
+                                                    'TLS': 'Web', 'DNS': 'Network'}}
+check('wanted: a table for the application of each rule switched on - Block or Alert - none for one switched off',
+      sorted(tables.wanted(dict(conf, blocked=[]), cat3)), ['appcontrol_NetFlix', 'appcontrol_TLS', 'appcontrol_YouTube',
+                                                            'appcontrol_cat_Web'])
+check('ruled and tabled: the applications of the rules switched on, with those of the settings',
+      (sorted(tables.ruled(conf)), sorted(tables.tabled(dict(conf, apps=['DNS'])))),
+      (['NetFlix', 'TLS', 'YouTube'], ['DNS', 'NetFlix', 'TLS', 'YouTube']))
+ALL3 = {'appcontrol_%s' % a: {'kind': 'application', 'name': a} for a in ('YouTube', 'NetFlix', 'TikTok', 'TLS', 'DNS')}
+found = tables.policy(conf, ALL3)
+check('policy: NetFlix blocked for every device (Blocked applications) - its Alert rule no block; YouTube from opt2; TLS '
+      'from every device but Teachers; the rule switched off, one of another action and one with no source, none',
+      {app: (f['everyone'], [(r['uuid'][-1], r['source'], r['not']) for r in f['rules']]) for app, f in found.items()},
+      {'NetFlix': (True, []), 'YouTube': (False, [('1', ['opt2'], False)]), 'TLS': (False, [('4', ['Teachers'], True)])})
+check('policy: an application whose table is not made yet - not applied - nothing; classifying off, nothing',
+      (sorted(tables.policy(conf, {k: v for k, v in ALL3.items() if k != 'appcontrol_YouTube'})),
+       tables.policy(dict(conf, classify=False), ALL3)), (['NetFlix', 'TLS'], {}))
+check('blocked: every application blocked, for every device or by a rule, with its table', tables.blocked(conf, ALL3),
+      {'NetFlix': 'appcontrol_NetFlix', 'YouTube': 'appcontrol_YouTube', 'TLS': 'appcontrol_TLS'})
+check('scope: every device; the elements of the rules\' sources; a rule from any is every device',
+      (tables.scope(found['NetFlix']), tables.scope(found['YouTube']), tables.scope(
+          {'everyone': False, 'rules': [{'source': ['any'], 'not': False}]}), tables.scope(None)),
+      (tables.EVERYONE, frozenset({('opt2', False)}), tables.EVERYONE, frozenset()))
+check('covers: every device covers anything; a wider set of sources a narrower one; not the other way, nor every device by '
+      'a set, nor another name for the same devices',
+      [tables.covers(tables.EVERYONE, frozenset({('opt2', False)})), tables.covers(frozenset({('opt2', False), ('lan', False)}),
+                                                                                  frozenset({('opt2', False)})),
+       tables.covers(frozenset({('opt2', False)}), frozenset({('opt2', False), ('lan', False)})),
+       tables.covers(frozenset({('opt2', False)}), tables.EVERYONE), tables.covers(frozenset({('Guests', False)}),
+                                                                                    frozenset({('opt2', False)})),
+       tables.covers(frozenset(), frozenset({('opt2', False)}))], [True, True, False, False, False, False])
+
+# ------------------------------------------------------------------------------------ where a source's devices are
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><interfaces><wan><if>em0</if></wan><lan><if>em1</if></lan><opt2><if>em2</if></opt2>'
+                     '<opt3><descr>none</descr></opt3></interfaces></opnsense>')
+    DEVICES = tables.interface_devices(config)
+    check('the interfaces of config.xml and their devices; one with no device left out', DEVICES,
+          {'wan': 'em0', 'lan': 'em1', 'opt2': 'em2'})
+BY_DEV = tables.device_networks(IFCONFIG_TEXT)
+check('ifconfig -a: each device\'s networks, link-local left out, each once',
+      {d: [str(n) for n in nets] for d, nets in BY_DEV.items()},
+      {'em0': ['203.0.113.0/24'], 'em1': ['192.0.2.0/24', '2001:db8:1::/64'], 'em2': ['198.51.100.128/25'],
+       'lo0': ['127.0.0.0/8', '::1/128'], 'pppoe0': ['203.0.113.50/32']})
+src_pf = FakePf({'Teachers': {'192.0.2.40', '192.0.2.41'}, 'Wing': {'192.0.2.0/25', '!192.0.2.64/26', '192.0.2.70'}})
+RESOLVED = {e: tables.resolve(e, DEVICES, BY_DEV, tables.Pf(run=src_pf))
+            for e in ('any', 'lan', 'opt2', '198.51.100.7', '2001:db8:9::/48', 'Teachers', 'Gone', '(self)', 'lanip')}
+check('a source\'s element resolved: any; an interface\'s networks from ifconfig; an address or a network as written; an '
+      'alias as pf holds its table; an alias pf holds no table for, the firewall itself and an address of its own - unread',
+      {e: (k, [str(n) + ('!' if inv else '') for n, inv in v] if isinstance(v, list) else v) for e, (k, v) in RESOLVED.items()},
+      {'any': ('any', None), 'lan': ('nets', ['192.0.2.0/24', '2001:db8:1::/64']), 'opt2': ('nets', ['198.51.100.128/25']),
+       '198.51.100.7': ('nets', ['198.51.100.7/32']), '2001:db8:9::/48': ('nets', ['2001:db8:9::/48']),
+       'Teachers': ('nets', ['192.0.2.40/32', '192.0.2.41/32']), 'Gone': ('unread', 'pf holds no table Gone'),
+       '(self)': ('unread', '(self) is the firewall itself'), 'lanip': ('unread', 'lanip is the firewall itself')})
+wing = tables.Pf(run=src_pf).entries('Wing')
+held = tables.Held(wing)
+check('a table with an entry written with !: an address in it when the most specific entry holding it is not inverted - '
+      '192.0.2.70 in the hole and in again, 192.0.2.65 in the hole, 192.0.2.10 and nothing else',
+      [a in held for a in ('192.0.2.10', '192.0.2.65', '192.0.2.70', '192.0.2.200', '2001:db8::1', 'no address')],
+      [True, False, True, False, False, False])
+check('flatten: the same addresses written without !, collapsed, IPv4 first',
+      [str(n) for n in tables.flatten(wing + [(tables.ipaddress.ip_network('2001:db8::/64'), False),
+                                              (tables.ipaddress.ip_network('203.0.113.0/24'), True)])],
+      ['192.0.2.0/26', '192.0.2.70/32', '2001:db8::/64'])
+check('flatten: a hole inside a hole already taken out, and a wider one first, change nothing more',
+      [str(n) for n in tables.flatten([(tables.ipaddress.ip_network('192.0.2.0/24'), False),
+                                       (tables.ipaddress.ip_network('192.0.2.0/28'), True),
+                                       (tables.ipaddress.ip_network('192.0.2.0/25'), True)])], ['192.0.2.128/25'])
+
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)
