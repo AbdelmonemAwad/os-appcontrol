@@ -306,10 +306,14 @@ _built, said_more = sr.build({'rules': [rule(number=1, uuid=U[1], app='Example_E
                                         rule(number=3, uuid=U[3], app='YouTube', source=['opt2', 'Gone'])]},
                              CATALOGUE, DEVICES, BY_DEV, PF, OWN)
 check('for the page, for every rule switched on - one Suricata cannot tell too: the elements of its source not read, and '
-      'whether it holds no device\'s address now', ([(report[k].get('unread'), report[k].get('empty')) for k in (U[1], U[5])],
-                                                     [(said_more[k]['reason'], said_more[k]['unread'], said_more[k]['empty'])
-                                                      for k in (U[1], U[2], U[3])]),
-      ([([], False), (['Gone'], False)], [('no_match', ['Gone'], False), ('empty', [], True), ('unread', ['Gone'], False)]))
+      'whether it holds no device\'s address now; part of a source not read - the rest written, as pf and the cut act on it',
+      ([(report[k].get('unread'), report[k].get('empty')) for k in (U[1], U[5])],
+       [(said_more[k]['reason'], said_more[k]['unread'], said_more[k]['empty'], said_more[k]['lines']) for k in (U[1], U[2], U[3])],
+       [r['source'] for r in _built]),
+      ([([], False), (['Gone'], False)], [('no_match', ['Gone'], False, 0), ('empty', [], True, 0), (None, ['Gone'], False, 36)],
+       ['[198.51.100.128/25,!198.51.100.129]']))
+check('inverted, one element of the source not read: no line - every device but those is not known',
+      sr.source(rule(source=['Gone'], **{'not': True}), DEVICES, BY_DEV, PF, OWN), (None, 'unread', 'Gone'))
 youtube = built[0]
 check('Block: drop, from the guests\' network but the firewall\'s address there; Alert: alert, from every address but '
       'the firewall\'s; the source said in each rule\'s comment',

@@ -222,16 +222,23 @@ def source(rule, devices, by_dev, pf, own=()):
 
 
 def source_of(rule, found, own=()):
-    """source(), from the elements resolved already (resolved())."""
-    entries, anything = [], False
+    """source(), from the elements resolved already (resolved()). An element that cannot be read leaves the rest of a
+    plain source to act, as pf - which switches off that element's expansion alone - and the cut (tables.Where) have
+    it; an inverted source needs every element read, as they do: its devices are not known else."""
+    entries, anything, unread = [], False, None
     for element in rule['source']:
         kind, value = found[element]
         if kind == 'unread':
-            return None, 'unread', element
+            if rule['not']:
+                return None, 'unread', element
+            unread = unread or element
+            continue
         if kind == 'any':
             anything = True
         else:
             entries.extend(value)
+    if unread is not None and not anything and not entries:
+        return None, 'unread', unread
     nets, mine = tables.flatten(entries), own_networks(own)
     if rule['not']:
         # every device but those, and never the firewall itself: its addresses left out with them

@@ -1202,7 +1202,7 @@ def say_unread(state, now=None):
     """An element of a rule's source that cannot be read - an alias pf holds no table for - said once, as the
     page's last error, while it stays so."""
     for element in sorted(set(state.where.unread) - state.unread_said):
-        state.fail('a block rule\'s source cannot be read, so nothing of its devices is cut: %s'
+        state.fail('part of a block rule\'s source cannot be read, and its devices are not cut: %s'
                    % state.where.unread[element], now)
     state.unread_said = set(state.where.unread)
 

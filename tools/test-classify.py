@@ -2090,7 +2090,7 @@ finally:
     classify.log = real_log
 check('a rule whose source cannot be read - an alias pf holds no table for: nothing cut, said once as the last error',
       (state.to_cut, said, state.status()['unread_sources']),
-      ([], ['a block rule\'s source cannot be read, so nothing of its devices is cut: pf holds no table Gone'],
+      ([], ['part of a block rule\'s source cannot be read, and its devices are not cut: pf holds no table Gone'],
        {'Gone': 'pf holds no table Gone'}))
 state = rules_state(GUEST_YT, blocked=['YouTube'])
 classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()), RULE_ALIASES,
