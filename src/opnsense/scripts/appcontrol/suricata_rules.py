@@ -529,10 +529,14 @@ def produce(summary, conf, applied, config, catalogue_path=None, path=None, temp
         summary['rules'] = {key(rule): {'number': rule['number'], 'lines': 0, 'reason': 'disabled'}
                             for rule in conf['rules']}
     text, rounds, before = None, 0, current(path)
-    # Suricata's verdict on the file as it is, kept from the write that tested it while nothing new is to be tested
-    kept = load(state).get('engine')
+    # Suricata's verdict on the file as it is, kept from the write that tested it while nothing new is to be tested;
+    # and a reload a start or a refresh could not have done, kept until one does it (main())
+    previous = load(state)
+    kept = previous.get('engine')
     summary['engine'] = kept if isinstance(kept, dict) and before is not None else {'state': 'unchecked', 'refused': 0,
                                                                                      'message': None}
+    if previous.get('reload_due') is True:
+        summary['reload_due'] = True
     while rules:
         try:
             text = render(rules, template)
@@ -603,11 +607,20 @@ def main(argv):
         if verb == 'write':
             print(json.dumps(write()))
         elif verb in ('start', 'refresh'):
+            due = load().get('reload_due') is True
             summary = write() if verb == 'start' else refresh()
-            if summary.get('changed'):
+            # a reload that failed before - configd busy - is asked for again, though the file has not changed since
+            if summary.get('changed') or (due and summary.get('status') == 'ok'):
                 summary['reload'] = reload_ids()
                 if summary['reload'] != 'ok':
                     summary['errors'].append(summary['reload'])
+                handle = locked()
+                if handle is not None:
+                    with handle:
+                        kept = load()
+                        if kept:
+                            kept['reload_due'] = summary['reload'] != 'ok'
+                            keep(kept)
             print(json.dumps(summary))
         elif verb == 'remove':
             handle = locked()

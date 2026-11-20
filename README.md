@@ -300,9 +300,9 @@ rule:
   boot among them - it writes it as the settings say, as it reads its own, the names of the nDPI it has just
   read among them; then every five minutes it resolves the rules last applied again - an alias whose table
   changed, a hostname or a MAC seen at another address, a new delegated prefix, an interface - and the file
-  is written, and `ids reload` run, only when that changed it; a rule saved and not applied does not come in
-  that way. One writer at a time, each through a file of its own beside the target. Each rule switched on
-  gives:
+  is written, and `ids reload` run, only when that changed it - or when such a reload failed before, configd
+  busy; a rule saved and not applied does not come in that way. One writer at a time, each through a file of
+  its own beside the target. Each rule switched on gives:
   - a line for each name the installed nDPI knows its application by - its host table, `ndpiReader
     --protos-dump 1`, read with its catalogue - in each of the four places a device writes one: the server
     name of TLS (`tls.sni`) and of QUIC (`quic.sni`), HTTP's Host (`http.host`) and the name a DNS question
@@ -775,12 +775,13 @@ before the fixes:
 - **the block rules** - `tools/test-rules.php`, 26 checks now: an address or a network written by hand in its
   own family's rule alone, inverted the other family's from any, and no registered rule holding an address of
   the other family - pfctl refuses such a rule and with it the firewall's whole ruleset;
-- **the Suricata rules** - `tools/test-suricata.py`, 78 checks now: each line's destination and source read as
+- **the Suricata rules** - `tools/test-suricata.py`, 80 checks now: each line's destination and source read as
   Suricata reads an address group - the destination the internet alone, none of the firewall's addresses,
   its networks or the blocks that are not the internet's; no source holding a firewall's address, any every
   address but them, a network holding one as an exception; a whole family negated never written; the rules
   last applied resolved again - an alias whose table changed, a new prefix, a name more in nDPI's table - and a
-  rule changed and not applied not coming in; one writer at a time, through files of their own; Suricata's own
+  rule changed and not applied not coming in; a reload that failed asked for again; one writer at a time,
+  through files of their own; Suricata's own
   test, a stand-in refusing a line, failing, or not there; a sid kept as the rules change around it, two
   meeting taking the next free; part of a source not read giving the rest; a comment line kept on one line;
   OpenVPN's group;

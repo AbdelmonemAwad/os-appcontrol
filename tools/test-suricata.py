@@ -677,6 +677,15 @@ with tempfile.TemporaryDirectory() as tmp:
         check('suricata_rules.py refresh, the file changed and the reload failing: said, exit 0',
               (status, answer['changed'], answer['reload'], answer['errors']),
               (0, True, 'configctl ids reload ended with status 1', ['configctl ids reload ended with status 1']))
+        program(os.path.join(tmp, 'configctl'), '#!/bin/sh\necho "$*" >> %s\n' % reloads)
+        os.remove(reloads)
+        status, answer = main('refresh')
+        check('the next refresh, nothing changed since: the reload that failed asked for again, and done',
+              (answer['changed'], answer.get('reload'), open(reloads).read(), json.load(open(state)).get('reload_due')),
+              (False, 'ok', 'ids reload\n', False))
+        os.remove(reloads)
+        status, answer = main('refresh')
+        check('and the one after: nothing to reload', ('reload' in answer, os.path.exists(reloads)), (False, False))
         status, answer = main('nothing')
         check('a verb it does not know: said, exit 0', (status, answer['errors']),
               (0, ['usage: suricata_rules.py write|start|refresh|remove']))
