@@ -678,7 +678,7 @@ status = state.status()
 check('status.json: what the page reads', sorted(status), sorted(['since', 'windows', 'window', 'totals', 'apps', 'last', 'error',
                                                                   'capped_windows', 'dropped_windows', 'stopped', 'interfaces',
                                                                   'engine', 'blocking', 'remembered', 'waiting_cut',
-                                                                  'last_cut']))
+                                                                  'last_cut', 'rule_cut', 'unread_sources']))
 check('status.json: the totals', {k: status['totals'][k] for k in ('named', 'guessed', 'unknown', 'no_app', 'added', 'refreshed')},
       {'named': 10, 'guessed': 2, 'unknown': 2, 'no_app': 2, 'added': 5, 'refreshed': 5})
 
@@ -1926,6 +1926,174 @@ check('flatten: a hole inside a hole already taken out, and a wider one first, c
       [str(n) for n in tables.flatten([(tables.ipaddress.ip_network('192.0.2.0/24'), False),
                                        (tables.ipaddress.ip_network('192.0.2.0/28'), True),
                                        (tables.ipaddress.ip_network('192.0.2.0/25'), True)])], ['192.0.2.128/25'])
+
+# ------------------------------------------------------------------------- the classifier's sources
+where = classify.Where()
+POLICY3 = {'YouTube': {'table': 'appcontrol_YouTube', 'everyone': False,
+                       'rules': [{'uuid': R1, 'number': 1, 'source': ['opt2'], 'not': False}]},
+           'TLS': {'table': 'appcontrol_TLS', 'everyone': False,
+                   'rules': [{'uuid': R4, 'number': 4, 'source': ['Teachers'], 'not': True}]},
+           'DNS': {'table': 'appcontrol_DNS', 'everyone': False,
+                   'rules': [{'uuid': 'u-gone', 'number': 7, 'source': ['Gone'], 'not': False},
+                             {'uuid': 'u-gone-not', 'number': 8, 'source': ['Gone'], 'not': True}]}}
+where.refresh(POLICY3, DEVICES, BY_DEV, tables.Pf(run=src_pf))
+check('where: a device in the source\'s network; one outside it; inverted - every device but the alias\'s; an alias that '
+      'cannot be read holds no device, inverted or not',
+      [where.holds(POLICY3['YouTube']['rules'][0], a) for a in ('198.51.100.130', '192.0.2.10')] +
+      [where.holds(POLICY3['TLS']['rules'][0], a) for a in ('192.0.2.40', '192.0.2.10')] +
+      [where.holds(r, '192.0.2.10') for r in POLICY3['DNS']['rules']], [True, False, False, True, False, False])
+check('where: what could not be read, and why', where.unread, {'Gone': 'pf holds no table Gone'})
+
+
+# ------------------------------------------------------------------------------------ a window under the rules
+def rules_state(rules=(), blocked=(), apps=()):
+    """A state whose settings hold the rules given, its addresses those of IFCONFIG_TEXT (em2, 198.51.100.128/25, is the
+    guest network opt2), its interfaces DEVICES."""
+    state = classify.State(T0, catalogue, {'classify': True, 'apps': list(apps), 'blocked': list(blocked),
+                                           'rules': [dict({'number': i + 1, 'enabled': True, 'action': 'block', 'not': False,
+                                                           'description': ''}, **r) for i, r in enumerate(rules)]},
+                           [('lan', 'em1'), ('opt2', 'em2')])
+    state.network = NET
+    state.devices = DEVICES
+    # as the service's first look does, before any window is judged
+    state.where.refresh({}, DEVICES, BY_DEV, tables.Pf(run=FakePf()))
+    return state
+
+
+GUEST_YT = [{'uuid': R1, 'app': 'YouTube', 'source': ['opt2']}]
+RULE_ALIASES = dict(aliases, appcontrol_NetFlix={'kind': 'application', 'name': 'NetFlix'},
+                    appcontrol_TLS={'kind': 'application', 'name': 'TLS'})
+guest = F(('198.51.100.10', 443), client=('198.51.100.130', 51401), iface='opt2')
+staff = F(('198.51.100.11', 443), client=('192.0.2.10', 51402))
+state = rules_state(GUEST_YT)
+fake = FakePf()
+counts = classify.apply(state, [('named', 'TLS.YouTube', guest, row(guest, 'TLS.YouTube', 'www.youtube.example')),
+                                ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube', 'www.youtube.example'))],
+                        tables.Pf(run=fake), RULE_ALIASES, T0 + 70, T0 + 70)
+check('YouTube blocked from the guest network by a rule: a guest\'s connection queued to be cut, for that rule; a LAN '
+      'device\'s not - remembered for when it is',
+      ([(c['client'][0], c['app'], c['rule']) for c in state.to_cut], [classify.unpacked(k)[1][0] for k in state.remembered]),
+      ([('198.51.100.130', 'YouTube', R1)], ['192.0.2.10']))
+check('a table with a block rule from a source takes a server by cut.py alone, as one blocked for every device',
+      fake.held.get('appcontrol_YouTube'), set())
+check('status.json: the applications blocked - by a rule too', state.status()['blocking'], ['YouTube'])
+state = rules_state([{'uuid': R4, 'app': 'TLS', 'source': ['Teachers'], 'not': True}])
+teacher = F(('198.51.100.12', 443), client=('192.0.2.40', 51403))
+classify.apply(state, [('named', 'TLS.YouTube', teacher, row(teacher, 'TLS.YouTube')),
+                       ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))],
+               tables.Pf(run=src_pf), RULE_ALIASES, T0 + 70, T0 + 70)
+check('TLS blocked for every device but the alias Teachers: a teacher\'s connection let through, another\'s cut - as TLS, '
+      'the protocol carrying it, by that rule', [(c['client'][0], c['app'], c['rule']) for c in state.to_cut],
+      [('192.0.2.10', 'TLS', R4)])
+state = rules_state([{'uuid': 'u-gone', 'app': 'YouTube', 'source': ['Gone']}])
+said = []
+real_log = classify.log
+classify.log = said.append
+try:
+    classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=src_pf), RULE_ALIASES,
+                   T0 + 70, T0 + 70)
+    classify.say_unread(state, T0 + 70)
+    classify.say_unread(state, T0 + 130)
+finally:
+    classify.log = real_log
+check('a rule whose source cannot be read - an alias pf holds no table for: nothing cut, said once as the last error',
+      (state.to_cut, said, state.status()['unread_sources']),
+      ([], ['a block rule\'s source cannot be read, so nothing of its devices is cut: pf holds no table Gone'],
+       {'Gone': 'pf holds no table Gone'}))
+state = rules_state(GUEST_YT, blocked=['YouTube'])
+classify.apply(state, [('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()), RULE_ALIASES,
+               T0 + 70, T0 + 70)
+check('blocked for every device as well (Blocked applications): any device\'s connection cut, for no rule',
+      [(c['client'][0], c['rule']) for c in state.to_cut], [('192.0.2.10', '')])
+state = rules_state(GUEST_YT + [{'uuid': R4, 'app': 'TLS', 'source': ['opt2']}])
+classify.apply(state, [('named', 'TLS.YouTube', guest, row(guest, 'TLS.YouTube'))], tables.Pf(run=FakePf()), RULE_ALIASES,
+               T0 + 70, T0 + 70)
+check('YouTube and TLS, the protocol carrying it, both blocked from the guests by two rules: cut as YouTube, by its rule - '
+      'nDPI\'s application before the protocol, as Blocked applications has it', [(c['app'], c['rule']) for c in state.to_cut],
+      [('YouTube', R1)])
+
+# a server two applications share, blocked for different devices
+gm_lan = F(('198.51.100.10', 443), client=('192.0.2.20', 51404))
+gm_rec = ('named', 'TLS.GMail', gm_lan, row(gm_lan, 'TLS.GMail', 'mail.example'))
+guest_rec = ('named', 'TLS.YouTube', guest, row(guest, 'TLS.YouTube', 'www.youtube.example'))
+GMAIL = dict(RULE_ALIASES, appcontrol_GMail={'kind': 'application', 'name': 'GMail'})
+for gmail_rule, want, what in (
+        (None, True, 'GMail not blocked at all'),
+        ({'uuid': 'u-gm', 'app': 'GMail', 'source': ['lan']}, True, 'GMail blocked for the LAN alone'),
+        ({'uuid': 'u-gm', 'app': 'GMail', 'source': ['lan', 'opt2']}, False, 'GMail blocked for the LAN and the guests'),
+        ({'uuid': 'u-gm', 'app': 'GMail', 'source': ['any']}, False, 'GMail blocked for every device')):
+    state = rules_state(GUEST_YT + ([gmail_rule] if gmail_rule else []))
+    classify.apply(state, [gm_rec, guest_rec], tables.Pf(run=FakePf()), GMAIL, T0 + 70, T0 + 70)
+    check('YouTube blocked from the guests, its server named GMail as well, %s: the guest\'s connection cut %s' % (
+        what, 'alone - its server for no table, it would stop GMail for guests it lets through' if want else
+        'and its server for the table - GMail is blocked for every guest anyway'),
+        [(c['app'], c['alone']) for c in state.to_cut if c['client'][0] == '198.51.100.130'], [('YouTube', want)])
+state = rules_state(GUEST_YT)
+state.blocking = {'YouTube': 'appcontrol_YouTube'}       # blocked before: its table not emptied
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10', '198.51.100.11'}})
+counts = classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
+check('a server in a table blocked from the guests, named GMail - not blocked for them: taken out of it',
+      (sorted(fake.held['appcontrol_YouTube']), counts['untabled']), (['198.51.100.11'], 1))
+state = rules_state(GUEST_YT + [{'uuid': 'u-gm', 'app': 'GMail', 'source': ['opt2']}])
+state.blocking = {'YouTube': 'appcontrol_YouTube', 'GMail': 'appcontrol_GMail'}
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10'}})
+classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
+check('the same, GMail blocked from the guests too: left in it', fake.held['appcontrol_YouTube'], {'198.51.100.10'})
+state = rules_state(GUEST_YT + [{'uuid': 'u-gm', 'app': 'GMail', 'source': ['lan']}])
+state.blocking = {'YouTube': 'appcontrol_YouTube', 'GMail': 'appcontrol_GMail'}
+fake = FakePf({'appcontrol_YouTube': {'198.51.100.10'}})
+classify.apply(state, [gm_rec], tables.Pf(run=fake), GMAIL, T0 + 70, T0 + 70)
+check('the same, GMail blocked for the LAN alone - let through for the guests: taken out', fake.held['appcontrol_YouTube'],
+      set())
+
+# the rules change: what waits for a cut, and what is remembered, looked at again
+state = rules_state(GUEST_YT)
+classify.apply(state, [guest_rec, ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()),
+               RULE_ALIASES, T0 + 70, T0 + 70)
+state.conf = dict(state.conf, rules=[dict(state.conf['rules'][0], source=['lan'])])
+classify.block(state, RULE_ALIASES, T0 + 80, tables.Pf(run=FakePf()))
+check('the rule\'s source changed from the guests to the LAN: the guest\'s connection waiting dropped, counted; the LAN '
+      'device\'s, remembered, queued now for the rule', ([(c['client'][0], c['rule']) for c in state.to_cut],
+                                                        state.totals['cut_unblocked'], len(state.remembered)),
+      ([('192.0.2.10', R1)], 1, 0))
+state = rules_state([])
+classify.apply(state, [guest_rec, ('named', 'TLS.YouTube', staff, row(staff, 'TLS.YouTube'))], tables.Pf(run=FakePf()),
+               RULE_ALIASES, T0 + 70, T0 + 70)
+state.conf = dict(state.conf, rules=[dict(GUEST_YT[0], number=1, enabled=True, action='block', **{'not': False},
+                                          description='')])
+emptied = classify.block(state, RULE_ALIASES, T0 + 80, tables.Pf(run=FakePf()))[1]
+check('a block rule added: the guests\' connection it remembered cut at once, the LAN device\'s left remembered; the '
+      'application\'s table, blocked since, given back to be emptied',
+      ([c['client'][0] for c in state.to_cut], [classify.unpacked(k)[1][0] for k in state.remembered], emptied),
+      (['198.51.100.130'], ['192.0.2.10'], ['appcontrol_YouTube']))
+state.to_cut = []
+classify.block(state, RULE_ALIASES, T0 + 90, tables.Pf(run=FakePf()))
+check('the same rules looked at again: nothing more queued', state.to_cut, [])
+
+# what cut.py says, for each rule
+state = rules_state(GUEST_YT)
+classify.count_cut(state, {'cut': 3, 'apps': {'YouTube': 3}, 'rules': {R1: 2, '': 1}}, 3, T0)
+classify.count_cut(state, {'cut': 1, 'rules': {R1: 1, 'bad': 'x'}}, 1, T0)
+check('cut.py\'s answer for each rule counted - \'\' for Blocked applications - and in status.json',
+      (state.rule_cut, state.status()['rule_cut']), ({R1: 3, '': 1, 'bad': 0}, {R1: 3, '': 1, 'bad': 0}))
+
+# read again (SIGHUP): the rules and their sources read again
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><interfaces><lan><if>em1</if></lan><opt2><if>em2</if></opt2></interfaces><OPNsense><Firewall>'
+                     '<Alias><aliases><alias><enabled>1</enabled><name>appcontrol_YouTube</name><type>external</type>'
+                     '<description>Application Control: YouTube</description></alias></aliases></Alias></Firewall>'
+                     '<AppControl><general><classify>1</classify></general><rules><rule uuid="%s"><enabled>1</enabled>'
+                     '<action>block</action><source>opt2</source><source_not>0</source_not><app>YouTube</app></rule></rules>'
+                     '</AppControl></OPNsense></opnsense>' % R1)
+    state = rules_state([])
+    state.network.by_dev = BY_DEV
+    classify.apply(state, [guest_rec], tables.Pf(run=FakePf()), RULE_ALIASES, T0 + 70, T0 + 70)
+    emptied = classify.reread(state, config, os.path.join(tmp, 'ndpi.json'), tables.Pf(run=FakePf()))
+    check('read again, a block rule of the guests there since: its remembered guest connection cut at once, its table '
+          'given back to be emptied', ([(c['client'][0], c['rule']) for c in state.to_cut], emptied, state.devices),
+          ([('198.51.100.130', R1)], ['appcontrol_YouTube'], {'lan': 'em1', 'opt2': 'em2'}))
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)
