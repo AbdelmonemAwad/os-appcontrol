@@ -15,8 +15,9 @@
  #                 lines: [{proto, match, sid}]}]
  #   threshold   one alert a device a minute for each line; a drop still drops every packet it matches
  #}
-# Application Control (os-appcontrol): the rules of its Rules tab, written by its page's Apply.
-# Change them there: this file is written again at the next Apply.
+# Application Control (os-appcontrol): the rules of its Rules tab, written by its page's Apply and kept
+# current by its classifier. Change them there: this file is written again. A change made to one of these lines
+# by its sid on the Intrusion Detection's page stays with that line while its rule stands.
 {% for rule in rules %}
 # rule {{ rule.number }}: {{ rule.action }} {{ rule.app }} from {{ rule.source_text }}
 {% for line in rule.lines %}
