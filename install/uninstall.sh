@@ -22,8 +22,11 @@ configctl appcontrol remove > /dev/null 2>&1 || true
 configctl appcontrol release > /dev/null 2>&1 || true
 # the Suricata rules of the Rules tab taken out of the Intrusion Detection's local rules; its rules
 # installed again without them, and Suricata told when it runs (ids reload)
-if [ -f /usr/local/etc/suricata/rules/appcontrol.rules ]; then
-    rm -f /usr/local/etc/suricata/rules/appcontrol.rules /usr/local/etc/suricata/rules/appcontrol.rules.new
+# installed, the file is in opnsense.rules/ too: with it alone there - a reload that failed before, configd busy -
+# the reload is asked for all the same, which takes it out
+if [ -f /usr/local/etc/suricata/rules/appcontrol.rules ] || [ -f /usr/local/etc/suricata/opnsense.rules/appcontrol.rules ]; then
+    rm -f /usr/local/etc/suricata/rules/appcontrol.rules /usr/local/etc/suricata/rules/appcontrol.rules.new \
+        /usr/local/etc/suricata/rules/.appcontrol.rules.*.new
     configctl ids reload > /dev/null 2>&1 || true
 fi
 

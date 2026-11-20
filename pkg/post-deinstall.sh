@@ -36,9 +36,11 @@ for d in /usr/local/opnsense/scripts/appcontrol /usr/local/opnsense/mvc/app/libr
 	[ -d "${d}" ] && find "${d}" -depth -type d -empty -delete 2> /dev/null
 done
 
-# The Suricata rules of the Rules tab, should pre-deinstall not have taken them out: no file of the package's.
-if [ -f /usr/local/etc/suricata/rules/appcontrol.rules ]; then
-	rm -f /usr/local/etc/suricata/rules/appcontrol.rules /usr/local/etc/suricata/rules/appcontrol.rules.new
+# The Suricata rules of the Rules tab, should pre-deinstall not have taken them out: no file of the package's. Its
+# installed copy in opnsense.rules/ too - pre-deinstall's reload failed, configd busy: the reload asked again.
+if [ -f /usr/local/etc/suricata/rules/appcontrol.rules ] || [ -f /usr/local/etc/suricata/opnsense.rules/appcontrol.rules ]; then
+	rm -f /usr/local/etc/suricata/rules/appcontrol.rules /usr/local/etc/suricata/rules/appcontrol.rules.new \
+		/usr/local/etc/suricata/rules/.appcontrol.rules.*.new
 	[ -f /usr/local/sbin/configctl ] && /usr/local/sbin/configctl ids reload > /dev/null 2>&1 || true
 fi
 

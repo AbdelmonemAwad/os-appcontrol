@@ -41,6 +41,8 @@ LOCAL = '/usr/local'
 MENU = '/usr/local/opnsense/mvc/app/models/OPNsense/AppControl/Menu/Menu.xml'
 SURICATA_TEMPLATE = '/usr/local/opnsense/service/templates/OPNsense/AppControl/appcontrol.rules'
 SURICATA_RULES = '/usr/local/etc/suricata/rules/appcontrol.rules'
+SURICATA_INSTALLED = '/usr/local/etc/suricata/opnsense.rules/appcontrol.rules'     # installRules.py's copy
+SURICATA_WRITER = '/usr/local/etc/suricata/rules/.appcontrol.rules.k3f9x2.new'    # a write's own file, left half
 XGS = '/usr/local/opnsense/mvc/app/models/OPNsense/XGS/Menu/Menu.xml'
 HOOK = '/usr/local/etc/inc/plugins.inc.d/appcontrol.inc'
 RC = '/usr/local/etc/rc.d/appcontrol'
@@ -405,6 +407,16 @@ with tempfile.TemporaryDirectory() as tmp:
           (os.path.exists(box.fake + SURICATA_RULES), os.path.exists(box.fake + SURICATA_RULES + '.new'),
            box.called('configctl')[1:3], box.plugin_files()),
           (False, False, ['configctl appcontrol release hook=yes', 'configctl ids reload hook=yes'], []))
+    # the rules file gone and its installed copy left - a reload that failed before, configd busy: asked for all the same
+    box.run('install/install.sh')
+    box.write(box.fake + SURICATA_INSTALLED, '# rules\n')
+    box.write(box.fake + SURICATA_WRITER, '# half written by a writer of its own\n')
+    box.forget()
+    rc, out = box.run('install/uninstall.sh')
+    check('uninstall.sh, the rules file gone but its installed copy left in opnsense.rules/: the Intrusion Detection\'s rules '
+          'installed again all the same, which takes it out; a file a writer left half written taken away',
+          (box.called('configctl ids'), os.path.exists(box.fake + SURICATA_WRITER)), (['configctl ids reload hook=yes'], False))
+    os.remove(box.fake + SURICATA_INSTALLED)
 
     # install.sh, ndpi not there; uninstall.sh removes it only when nothing needs it
     os.remove(os.path.join(box.pkgdb, 'ndpi'))
@@ -478,6 +490,12 @@ with tempfile.TemporaryDirectory() as tmp:
             'pkill -f %s/usr/local/opnsense/scripts/[a]ppcontrol/' % box.fake, 'umount -f %s' % (box.fake + WORK),
             'configctl appcontrol remove hook=yes', 'configctl appcontrol release hook=yes', 'configctl ids reload hook=yes'],
            False))
+    box.write(box.fake + SURICATA_INSTALLED, '# rules\n')
+    box.forget()
+    box.run('pkg/pre-deinstall.sh', env={'PKG_UPGRADE': ''})
+    check('pre-deinstall.sh, the rules file gone and its installed copy left: the reload asked for all the same',
+          box.called('configctl ids'), ['configctl ids reload hook=yes'])
+    os.remove(box.fake + SURICATA_INSTALLED)
     box.write(box.fake + SURICATA_RULES, '# rules\n')
     os.makedirs(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__', exist_ok=True)
     box.write(box.fake + '/usr/local/opnsense/scripts/appcontrol/__pycache__/classify.cpython-311.pyc', 'x')
@@ -495,6 +513,12 @@ with tempfile.TemporaryDirectory() as tmp:
            'configctl cron restart hook=no', 'pfctl -t appcontrol_cat_Gone -T kill', 'pfctl -t appcontrol_cat_Web -T kill'])
     check('post-deinstall.sh: the window files\' tmpfs taken down before the state goes', box.called('umount'),
           ['umount -f %s' % (box.fake + WORK)])
+    box.write(box.fake + SURICATA_INSTALLED, '# rules\n')
+    box.forget()
+    box.run('pkg/post-deinstall.sh')
+    check('post-deinstall.sh, the rules file gone and its installed copy left - pre-deinstall\'s reload failed: the reload '
+          'asked again, which takes it out', box.called('configctl ids'), ['configctl ids reload hook=no'])
+    os.remove(box.fake + SURICATA_INSTALLED)
 
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)
