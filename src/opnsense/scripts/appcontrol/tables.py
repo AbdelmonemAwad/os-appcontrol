@@ -36,6 +36,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
 PREFIX = 'appcontrol_'
@@ -46,6 +47,7 @@ PFCTL = '/sbin/pfctl'
 CONFIG = '/conf/config.xml'
 CATALOGUE = '/var/db/os-appcontrol/ndpi.json'
 BATCH = 64
+GONE_WAIT = 15         # seconds flush-gone gives pf to let go of a table its rules still used (Apply's reload)
 TTL = 3600
 
 
@@ -244,23 +246,34 @@ class Pf:
                 self.errors.append('pfctl -t %s -T %s: %s' % (table, verb, out.strip()[:200]))
 
 
-def flush_gone(pf, path=CONFIG):
+def flush_gone(pf, path=CONFIG, wait=GONE_WAIT, sleep=time.sleep):
     """[table] taken out: the appcontrol_ tables pf holds whose alias config.xml no longer has, and that no
     rule uses. A table outlives its alias and its rules and goes on holding its addresses (os-blocklists,
     2026-10-29); emptied only, it stays listed in pf until the next boot (99 of them after Apply off and
     after the removal, on the second XGS 3300, 2026-11-17), so it is killed. One a rule still uses, or
-    whose alias is there, is left as it is."""
+    whose alias is there, is left as it is.
+
+    The filter reload that drops the block rules may still be loading them when this looks: on the second
+    XGS 3300 (2026-11-20) appcontrol_YouTube was still a rule's then, at Apply with classifying off and at
+    the removal, and stayed in pf with its address. So while a table whose alias is gone is still a rule's,
+    this reads pf again a second at a time, `wait` seconds at most, before it takes out what no rule uses."""
     try:
         root = ET.parse(path).getroot()
         names = {(a.findtext('name') or '').strip() for a in root.findall('OPNsense/Firewall/Alias/aliases/alias')}
     except (OSError, ET.ParseError):
         return []
-    status, out = pf.run(['-v', '-s', 'Tables'])
-    if status != 0:
-        return []
+    lines = []
+    for tick in range(max(0, int(wait)) + 1):
+        status, out = pf.run(['-v', '-s', 'Tables'])
+        if status != 0:
+            return []
+        lines = [line.split() for line in out.splitlines()]
+        used = [p for p in lines if len(p) >= 2 and p[1].startswith(PREFIX) and p[1] not in names and 'r' in p[0]]
+        if not used or tick == wait:
+            break
+        sleep(1)
     killed = []
-    for line in out.splitlines():
-        parts = line.split()
+    for parts in lines:
         if len(parts) < 2 or not parts[1].startswith(PREFIX) or 'r' in parts[0] or parts[1] in names:
             continue
         status, text = pf.run(['-t', parts[1], '-T', 'kill'])

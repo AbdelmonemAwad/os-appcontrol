@@ -287,6 +287,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check('flush-gone: that table taken out of pf (killed), not only emptied; the others kept',
           sorted(fake.held), ['appcontrol_cat_Gone_used', 'appcontrol_cat_Web', 'bogons'])
 
+    # the reload still loading: a table whose alias is gone is a rule's for the first two reads, then not -
+    # flush-gone reads pf again a second at a time and takes it out once no rule uses it (2026-11-20: left in pf)
+    class LatePf(FakePf):
+        reads = 0
+
+        def __call__(self, args):
+            if args[:3] == ['-v', '-s', 'Tables']:
+                LatePf.reads += 1
+                return 0, ''.join('-pa-%s--\t%s\n' % ('r' if t.endswith('_late') and LatePf.reads <= 2 else '-', t)
+                                  for t in sorted(self.held))
+            return FakePf.__call__(self, args)
+    fake = LatePf({'appcontrol_cat_Gone_late': {'198.51.100.4'}, 'appcontrol_cat_Web': {'198.51.100.1'}})
+    slept = []
+    check('flush-gone: a table a rule lets go of within the wait is taken out, after two seconds\' wait',
+          (tables.flush_gone(tables.Pf(run=fake), config, sleep=slept.append), len(slept)),
+          (['appcontrol_cat_Gone_late'], 2))
+    fake = FakePf({'appcontrol_cat_Gone_used': {'198.51.100.3'}})
+    slept = []
+    check('flush-gone: one a rule goes on using is left, after the wait (3 s here)',
+          (tables.flush_gone(tables.Pf(run=fake), config, wait=3, sleep=slept.append), len(slept)), ([], 3))
+
 
 # --------------------------------------------------------------------------------- the capture
 def stream_of(packets, chunk=None, linktype=1):
