@@ -345,6 +345,7 @@ with tempfile.TemporaryDirectory() as tmp:
     config = os.path.join(tmp, 'config.xml')
     catalogue = os.path.join(tmp, 'ndpi.json')
     rules_file = os.path.join(tmp, 'suricata', 'rules', 'appcontrol.rules')
+    sr.LOCK = os.path.join(tmp, 'suricata.lock')
     state = os.path.join(tmp, 'suricata.json')
     ifconfig = os.path.join(tmp, 'ifconfig')
     with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
@@ -420,6 +421,78 @@ with tempfile.TemporaryDirectory() as tmp:
         summary['rules'][U[1]]['reason'], summary['rules'][U[1]]['lines'], summary['rules'][U[2]]['lines'], summary['lines'],
         'googlevideo' in open(rules_file).read()), ('too_long', 0, 1, 1, False))
 
+    # kept current: the rules last applied resolved again, as pf and the cut follow their sources
+    def refresh():
+        return sr.refresh(config, catalogue, rules_file, TEMPLATE, state, ifconfig, PF)
+
+    PF.run.held['Kids'] = ['192.0.2.50']
+    kids = rule_xml(U[1], 'YouTube', 'Kids') + rule_xml(U[3], 'SSH', 'lan', action='alert')
+    summary = write(rules_xml=kids)
+    applied = json.load(open(state))['applied']
+    check('written: what was applied kept - classifying, the rules, a digest of what each puts in force', (
+        applied['classify'], [(r['uuid'], r['source']) for r in applied['rules']], sorted(applied['digests'])),
+        (True, [(U[1], ['Kids']), (U[3], ['lan'])], [U[1], U[3]]))
+    summary = refresh()
+    check('refreshed, nothing changed since: the file left, not changed', (summary['status'], summary['changed']), ('ok', False))
+    PF.run.held['Kids'] = ['192.0.2.51']
+    summary = refresh()
+    text = open(rules_file).read()
+    check('an alias whose table changed - a hostname resolved again, a MAC seen at another address: the next refresh '
+          'writes its new address, changed', (summary['changed'], '[192.0.2.51]' in text, '192.0.2.50' in text), (True, True, False))
+    with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
+        handle.write(IFCONFIG_TEXT.replace('2001:db8:1::', '2001:db8:5::'))
+    summary = refresh()
+    text = open(rules_file).read()
+    check('the LAN\'s IPv6 prefix changed (a new delegated prefix): the next refresh writes the new one, the old gone',
+          (summary['changed'], '2001:db8:5::/64' in text, '2001:db8:1::' in text), (True, True, False))
+    with open(os.path.join(tmp, 'ifconfig.txt'), 'w') as handle:
+        handle.write(IFCONFIG_TEXT)
+    with open(catalogue, 'w') as handle:
+        json.dump(dict(CATALOGUE, hosts=dict(HOSTS_TABLE, YouTube=HOSTS_TABLE['YouTube'] + ['ytnew.example'])), handle)
+    summary = refresh()
+    check('the installed nDPI read again with a name more for the application: the next refresh writes its four lines',
+          (summary['changed'], open(rules_file).read().count('"ytnew.example"'), summary['rules'][U[1]]['names']),
+          (True, 4, 10))
+    with open(catalogue, 'w') as handle:
+        json.dump(CATALOGUE, handle)
+    refresh()
+    with open(config, 'w') as handle:
+        handle.write(CONFIG % ('1', rule_xml(U[1], 'YouTube', 'opt2') + rule_xml(U[3], 'SSH', 'lan', action='alert',
+                                                                                 enabled='0')))
+    summary = refresh()
+    text = open(rules_file).read()
+    check('a rule changed in config.xml and not applied - its source, another switched off: a refresh leaves them as '
+          'applied, the digests kept', (summary['changed'], '# rule 1: block YouTube from Kids' in text,
+                                        'app-layer-protocol:ssh' in text, json.load(open(state))['applied'] == applied),
+          (False, True, True, True))
+    os.remove(state)
+    summary = refresh()
+    check('nothing applied kept - /var lost at a boot: a refresh writes as config.xml says', (
+        summary['changed'], '# rule 1: block YouTube from opt2' in open(rules_file).read(), 'app-layer-protocol:ssh' in
+        open(rules_file).read(), sorted(json.load(open(state))['applied']['digests'])), (True, True, False, [U[1], U[3]]))
+    with open(state, 'w') as handle:
+        json.dump({'applied': {'classify': True, 'rules': [{'uuid': U[1], 'source': 'not a list'}]}}, handle)
+    summary = refresh()
+    check('what is kept not rules: as config.xml says', (summary['status'], sorted(summary['applied']['digests'])),
+          ('ok', [U[1], U[3]]))
+    check('every file written in one step - none left beside it, no fixed name shared by two writers',
+          sorted(os.listdir(os.path.dirname(rules_file))), ['appcontrol.rules'])
+    holder = sr.locked(sr.LOCK)
+    kept_wait = sr.LOCK_WAIT
+    sr.LOCK_WAIT = 0.5
+    try:
+        with open(config, 'w') as handle:
+            handle.write(CONFIG % ('1', two))
+        before = open(rules_file).read()
+        summary = write()
+        again = refresh()
+    finally:
+        sr.LOCK_WAIT = kept_wait
+        holder.close()
+    check('one writer at a time: another holding the lock past the wait - Apply\'s write, a refresh - nothing written, said',
+          (summary['status'], again['status'], open(rules_file).read() == before, summary['errors']),
+          ('failed', 'failed', True, ['another write of the Suricata rules held them past 0.5 s: left as they were']))
+
     # the command line, with its own places
     sr.RULES, sr.STATE, sr.TEMPLATE, sr.IFCONFIG = rules_file, state, TEMPLATE, ifconfig
     tables.CONFIG, tables.CATALOGUE = config, catalogue
@@ -447,8 +520,30 @@ with tempfile.TemporaryDirectory() as tmp:
               (0, True, False))
         status, answer = main('remove')
         check('removed again: nothing changed', answer['changed'], False)
+        reloads = os.path.join(tmp, 'reloads')
+        program(os.path.join(tmp, 'configctl'), '#!/bin/sh\necho "$*" >> %s\n' % reloads)
+        sr.CONFIGCTL = os.path.join(tmp, 'configctl')
+        status, answer = main('start')
+        check('suricata_rules.py start - the classifier\'s start: written as config.xml says, then the Intrusion Detection\'s '
+              'rules installed again and Suricata told, as it changed', (status, answer['changed'], answer['reload'],
+                                                                         open(reloads).read()), (0, True, 'ok', 'ids reload\n'))
+        status, answer = main('refresh')
+        check('suricata_rules.py refresh, nothing changed: no reload', (status, answer['changed'], 'reload' in answer,
+                                                                        open(reloads).read()), (0, False, False, 'ids reload\n'))
+        PF.run.held['Teachers'] = ['192.0.2.42']
+        with open(state) as handle:
+            kept_state = json.load(handle)
+        with open(state, 'w') as handle:
+            json.dump(dict(kept_state, applied=sr.applied_from({'classify': True, 'rules': [
+                dict(rule(number=1, uuid=U[6], app='TLS', source=['Teachers']))]})), handle)
+        program(os.path.join(tmp, 'configctl'), '#!/bin/sh\necho "$*" >> %s\nexit 1\n' % reloads)
+        status, answer = main('refresh')
+        check('suricata_rules.py refresh, the file changed and the reload failing: said, exit 0',
+              (status, answer['changed'], answer['reload'], answer['errors']),
+              (0, True, 'configctl ids reload ended with status 1', ['configctl ids reload ended with status 1']))
         status, answer = main('nothing')
-        check('a verb it does not know: said, exit 0', (status, answer['errors']), (0, ['usage: suricata_rules.py write|remove']))
+        check('a verb it does not know: said, exit 0', (status, answer['errors']),
+              (0, ['usage: suricata_rules.py write|start|refresh|remove']))
         real_write = sr.write
 
         def broken(*args, **kwargs):

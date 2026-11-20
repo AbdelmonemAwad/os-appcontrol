@@ -73,6 +73,13 @@ application is cut whoever sends. A server two applications share goes into the 
 the other's block reaches every device the first one's does (tables.covers()); else that connection
 alone is cut. Each cut is counted for the rule that made it.
 
+The Suricata rules of the Rules tab follow the same sources: while a rule is switched on, suricata_rules.py
+runs beside the capture, not waited for - `start` as the service starts, at boot among them, writing them as
+the settings say, as the service reads its own; then `refresh` every SURICATA_EVERY seconds, the rules last
+applied resolved again - an alias whose table changed, a new delegated prefix, the installed nDPI's names -
+the file written and the Intrusion Detection told only when that changed it. What it could not do is the
+page's last error.
+
 What it found goes to /var/db/os-appcontrol: status.json (the page's cards and Applications) and
 unknown.json (the page's Unknown), written after every window. Nothing is held on the firewall: no
 connection waits for its classification, and an allowed one goes into hardware on os-xgs-npu's own
@@ -137,6 +144,10 @@ CUT_TIMEOUT = 120           # seconds a cut may take - cut.py ends its kills at 
 CUT_MOST = 5000             # connections one cut takes; the rest wait for the next
 CUT_WAITING = 20000         # connections waiting for a cut at most; past it the oldest are left uncut, and said
 CUT_TRIES = 2               # runs a connection is given: one stopped at its time, or past cut.py's own, goes again
+SURICATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'suricata_rules.py')
+SURICATA_EVERY = 300        # seconds between two looks at the Suricata rules' sources and names: each change
+                            # installs every rule of the Intrusion Detection again
+SURICATA_TIMEOUT = 900      # seconds a look may take - its reload of the Intrusion Detection's rules among them
 REMEMBER = 50000            # connections named here remembered, for a cut when their application is blocked
 REMEMBER_FOR = 86400        # seconds: pf keeps an established TCP connection a day without a packet
 NAMES_MOST = 20000          # servers whose names are kept, to tell one an application not blocked shares
@@ -1099,6 +1110,89 @@ class Cutter:
                 pass
 
 
+class SuricataRules:
+    """suricata_rules.py beside the capture, not waited for, one run at a time, while a rule of the Rules tab is
+    switched on: `start` once as the service starts - the rules written as the settings say, which the service
+    reads itself then - and `refresh` every SURICATA_EVERY seconds after: what was applied resolved again, and the
+    Intrusion Detection told only when the file changed (the script runs configctl ids reload itself). Its answer is
+    a file in the work directory, read when it ends; what it could not do is the page's last error. A run past
+    SURICATA_TIMEOUT is stopped. No script (None): nothing run."""
+
+    def __init__(self, work, script=SURICATA):
+        self.work, self.script = work, script
+        self.proc = None
+        self.started = 0.0
+        self.next_at = None
+        self.runs = 0
+        self.path = None
+
+    def due(self, state):
+        return (self.script is not None and self.proc is None and bool(tables.ruled(state.conf))
+                and (self.next_at is None or time.monotonic() >= self.next_at))
+
+    def begin(self, state, now):
+        """The next run: start the first time, refresh after."""
+        verb = 'refresh' if self.runs else 'start'
+        self.runs += 1
+        self.next_at = time.monotonic() + SURICATA_EVERY
+        self.path = os.path.join(self.work, 'suricata-%d.out' % self.runs)
+        try:
+            with open(self.path, 'w') as out:
+                self.proc = subprocess.Popen([self.script, verb], stdin=subprocess.DEVNULL, stdout=out,
+                                             stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.proc = None
+            self._remove()
+            state.fail('the Suricata rules of the Rules tab could not be looked at: %s could not be run: %s'
+                       % (self.script, error), now)
+            return
+        self.started = time.monotonic()
+
+    def poll(self, state, now):
+        """The run over: what it could not do said. True while one runs."""
+        if self.proc is None:
+            return False
+        if self.proc.poll() is None:
+            if time.monotonic() - self.started <= SURICATA_TIMEOUT:
+                return True
+            self.proc.kill()
+            self.proc.wait()
+            state.fail('the Suricata rules of the Rules tab: suricata_rules.py took longer than %d s, stopped'
+                       % SURICATA_TIMEOUT, now)
+        else:
+            try:
+                with open(self.path, encoding='utf-8') as handle:
+                    answer = json.load(handle)
+            except (OSError, ValueError):
+                answer = None
+            if not isinstance(answer, dict):
+                state.fail('the Suricata rules of the Rules tab: suricata_rules.py said nothing that could be read', now)
+            else:
+                for problem in answer.get('errors') or []:
+                    state.fail('the Suricata rules of the Rules tab: %s' % problem, now)
+        self.proc = None
+        self._remove()
+        return False
+
+    def finish(self, state, now, wait=5.0):
+        """At the service's end: a run going is given `wait` seconds, or stopped."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        self.poll(state, now)
+
+    def _remove(self):
+        if self.path:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
 def count_cut(state, answer, asked, now):
     """cut.py's answer in the state: the connections cut, the pf states killed, those dropped in hardware
     first, the servers it put in their tables and the connections it cut alone, those it left as their
@@ -1217,8 +1311,9 @@ def save_state(state, captures, status, unknown):
 
 def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUMP, pf=None, config=CONFIG,
           catalogue_path=tables.CATALOGUE, status=STATUS, unknown=UNKNOWN, work=WORK, refresh=True,
-          ifconfig=IFCONFIG, mount=MOUNT, cut=CUT):
-    """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged)."""
+          ifconfig=IFCONFIG, mount=MOUNT, cut=CUT, suricata=SURICATA):
+    """The service's loop until SIGTERM (or, for a test, until stop_after windows are judged). suricata: the script
+    that keeps the Suricata rules of the Rules tab current (SuricataRules), None for none."""
     global reload_asked
     while True:
         state = start_state(now, reader, config, catalogue_path, refresh, mount, work, status)
@@ -1235,6 +1330,7 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
     conf, catalogue, watched, start = state.conf, state.catalogue, state.watched, state.since
     pf = pf or tables.Pf()
     cutter = Cutter(work, cut)
+    rules_job = SuricataRules(work, suricata)
 
     def save(captures):
         save_state(state, captures, status, unknown)
@@ -1368,12 +1464,16 @@ def serve(stop_after=None, now=time.time, reader=ndpi.NDPIREADER, tcpdump=TCPDUM
                 break
         if not cutter.poll(state, t):
             cutter.start(state, t)
+        # the Suricata rules: written as the service starts, then their sources and names looked at again
+        if not rules_job.poll(state, t) and rules_job.due(state):
+            rules_job.begin(state, t)
     for c in captures:
         c.stop()
     if job is not None:
         job.kill()
         job.remove()
     cutter.finish(state, now())
+    rules_job.finish(state, now())
     state.stopped = now()
     save(captures)
     return state

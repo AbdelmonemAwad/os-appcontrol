@@ -1683,6 +1683,37 @@ with tempfile.TemporaryDirectory() as tmp:
           ({k: saved['totals'][k] for k in ('to_cut', 'cut', 'cut_states')}, saved['apps']['YouTube'].get('cut'), saved['blocking']),
           ({'to_cut': 1, 'cut': 1, 'cut_states': 2}, 1, ['YouTube']))
 
+# ------------------------------------------------------- the service keeps the Suricata rules of the Rules tab current
+SURICATA_STAND_IN = ('#!/usr/bin/env python3\nimport json, sys\nopen(%r, "a").write(sys.argv[1] + "\\n")\n'
+                     'print(json.dumps({"status": "ok", "changed": False, "errors": ["a test problem"] '
+                     'if sys.argv[1] == "refresh" else []}))\n')
+with tempfile.TemporaryDirectory() as tmp:
+    verbs_file = os.path.join(tmp, 'verbs')
+    program(os.path.join(tmp, 'suricata_rules.py'), SURICATA_STAND_IN % verbs_file)
+    kept_every = classify.SURICATA_EVERY
+    classify.SURICATA_EVERY = 1.5
+    try:
+        state, saved, rows, asked, held = service(
+            tmp, TWO, YOUTUBE, YOUTUBE, suricata=os.path.join(tmp, 'suricata_rules.py'), stop_after=2,
+            change=lambda text: text.replace('</AppControl>', '<rules><rule uuid="cccccccc-0000-4000-8000-000000000001">'
+                                             '<enabled>1</enabled><action>alert</action><source>lan</source>'
+                                             '<source_not>0</source_not><app>YouTube</app><description/></rule></rules>'
+                                             '</AppControl>'))
+        verbs = open(verbs_file).read().split() if os.path.exists(verbs_file) else []
+        said = [e for e in [saved.get('error') or {}] if e]
+        check('the service with a rule of the Rules tab: suricata_rules.py start as it starts - the rules written as the '
+              'settings say - then refresh every SURICATA_EVERY seconds, its answer\'s problems the last error',
+              (verbs[:1], len(verbs) >= 2 and set(verbs[1:]) == {'refresh'},
+               any('the Suricata rules of the Rules tab: a test problem' in e.get('message', '') for e in said)),
+              (['start'], True, True))
+        os.remove(verbs_file)
+        state, saved, rows, asked, held = service(tmp, TWO, YOUTUBE, YOUTUBE, suricata=os.path.join(tmp, 'suricata_rules.py'),
+                                                  stop_after=1)
+        check('the service with no rule switched on: suricata_rules.py never run - Apply took the file away',
+              os.path.exists(verbs_file), False)
+    finally:
+        classify.SURICATA_EVERY = kept_every
+
 # ------------------------------------------------------- the settings read again (SIGHUP): an application blocked since
 with tempfile.TemporaryDirectory() as tmp:
     cuts_file = os.path.join(tmp, 'cuts')

@@ -9,10 +9,16 @@ OPNsense's own Intrusion Detection, in /usr/local/etc/suricata/rules/appcontrol.
 the second XGS 3300: a file there and configctl ids reload - installed, alerting, gone once removed).
 
     suricata_rules.py write     the file written as the settings say - the page's Apply, the installation
+    suricata_rules.py start     the same, then configctl ids reload when it changed - the classifier's start, at
+                                boot among them, as it reads its own settings then
+    suricata_rules.py refresh   the rules last written (start or write) resolved again - their sources' addresses,
+                                the installed nDPI's names - then configctl ids reload when the file changed: the
+                                classifier, every few minutes, so the lines follow an alias, a prefix, an interface
+                                as pf and the cut do; a rule saved since and not applied does not come in by it
     suricata_rules.py remove    the file removed
 
-Each prints JSON - changed: whether the file changed, so the caller runs configctl ids reload (installRules.py,
-then Suricata's own reload) - and exits 0.
+Each prints JSON - changed: whether the file changed, so the caller of write runs configctl ids reload
+(installRules.py, then Suricata's own reload) - and exits 0. One at a time (LOCK): a write waits for a refresh.
 
 The lines are the plugin's template, templates/OPNsense/AppControl/appcontrol.rules, rendered here with
 Jinja2, not by configd: what they match is no setting's. Each rule of the Rules tab switched on, while
@@ -48,16 +54,21 @@ page. sid: SID_BASE + the rule's place among the rules * SID_SPAN + the line's, 
 rules, which count down from 4294967294. One alert a device a minute for each line (threshold), however many
 connections: a drop still drops each packet.
 
-The file is written only when what it says changes, in one step (renamed into place), and removed when no rule
-gives a line. What was written is kept in /var/db/os-appcontrol/suricata.json for the page. Never fails its
-caller.
+The file is written only when what it says changes, in one step (a file of its own beside it, renamed into place),
+and removed when no rule gives a line. What was written is kept in /var/db/os-appcontrol/suricata.json for the
+page, with the rules it was written from - those the last write or start applied, which refresh resolves again,
+and by which the page tells a rule changed since. Never fails its caller.
 """
 
+import fcntl
+import hashlib
 import ipaddress
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -67,7 +78,11 @@ import tables                                                            # noqa:
 RULES = '/usr/local/etc/suricata/rules/appcontrol.rules'
 TEMPLATE = '/usr/local/opnsense/service/templates/OPNsense/AppControl/appcontrol.rules'
 STATE = '/var/db/os-appcontrol/suricata.json'
+LOCK = '/var/db/os-appcontrol/suricata.lock'
+LOCK_WAIT = 300         # seconds a write waits for another - a refresh's ids reload among it
 IFCONFIG = '/sbin/ifconfig'
+CONFIGCTL = '/usr/local/sbin/configctl'
+RELOAD_TIMEOUT = 300    # seconds configctl ids reload is given: installRules.py installs every rule again
 SID_BASE = 3990000000
 SID_SPAN = 10000
 MOST_RULES = 999
@@ -257,29 +272,145 @@ def remove(path=None):
         return False, '%s could not be removed: %s' % (path, error)
 
 
-def keep(summary, path=None):
-    path = path or STATE
+def put(path, text, mode=0o644):
+    """text written to path in one step: a file of its own beside it - no other writer's name - renamed into
+    place. Its name begins with a dot and does not end in .rules: installRules.py's glob never takes it."""
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.%s.' % os.path.basename(path), suffix='.new', dir=folder)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + '.new'
-        with open(tmp, 'w', encoding='utf-8') as handle:
-            json.dump(summary, handle)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def keep(summary, path=None):
+    try:
+        put(path or STATE, json.dumps(summary), 0o640)
     except OSError:
         pass
 
 
+def load(path=None):
+    try:
+        with open(path or STATE, encoding='utf-8') as handle:
+            found = json.load(handle)
+        return found if isinstance(found, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def locked(path=None, wait=None):
+    """The lock a write, a start, a refresh and a removal of the file hold, one at a time, as an open file; None
+    when it could not be had within `wait` seconds (LOCK_WAIT)."""
+    path = path or LOCK
+    wait = LOCK_WAIT if wait is None else wait
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handle = open(path, 'w')
+    except OSError:
+        return None
+    until = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except OSError:
+            if time.monotonic() >= until:
+                handle.close()
+                return None
+            time.sleep(0.2)
+
+
+def key(rule):
+    return rule['uuid'] or str(rule['number'])
+
+
+def digest(rule):
+    """What a rule puts in force - switched on or off, its action, its application, its source, inverted or not - as
+    a short digest: the page tells a rule changed since the rules were last applied by it (status.py rules)."""
+    what = [bool(rule['enabled']), rule['action'], rule['app'], list(rule['source']), bool(rule['not'])]
+    return hashlib.sha1(json.dumps(what).encode('utf-8')).hexdigest()[:16]
+
+
+def applied_from(conf):
+    """What a write applies: whether classifying is on, the rules as config.xml has them, and their digests."""
+    return {'classify': bool(conf['classify']), 'rules': conf['rules'],
+            'digests': {key(rule): digest(rule) for rule in conf['rules']}}
+
+
+RULE_KEYS = {'number': int, 'uuid': str, 'enabled': bool, 'action': str, 'app': str, 'source': list, 'not': bool,
+             'description': str}
+
+
+def applied_rules(applied):
+    """The rules a former write applied, as kept in suricata.json, or None when what is kept is not that."""
+    if not isinstance(applied, dict) or not isinstance(applied.get('rules'), list) or \
+            not isinstance(applied.get('classify'), bool):
+        return None
+    for rule in applied['rules']:
+        if not isinstance(rule, dict) or any(not isinstance(rule.get(k), t) for k, t in RULE_KEYS.items()) or \
+                not all(isinstance(e, str) for e in rule['source']):
+            return None
+    return applied['rules']
+
+
+def failed(summary, why):
+    summary.update({'status': 'failed', 'errors': [why]})
+    return summary
+
+
 def write(config=None, catalogue_path=None, path=None, template=None, state=None, ifconfig=None, pf=None):
-    """The rules file made to say what the settings say. The summary: status, changed, lines, the rules - what
-    each gave - and errors."""
-    config, path, template = config or tables.CONFIG, path or RULES, template or TEMPLATE
-    summary = {'status': 'ok', 'changed': False, 'lines': 0, 'rules': {}, 'path': path, 'at': int(time.time()),
+    """The rules file made to say what the settings say: the rules of config.xml applied. The summary: status,
+    changed, lines, the rules - what each gave - what was applied, and errors."""
+    config = config or tables.CONFIG
+    summary = {'status': 'ok', 'changed': False, 'lines': 0, 'rules': {}, 'path': path or RULES, 'at': int(time.time()),
                'errors': []}
     conf = tables.settings(config)
     if not conf['read']:
-        summary.update({'status': 'failed', 'errors': ['%s could not be read: the Suricata rules left as they were'
-                                                       % config]})
-        return summary
+        return failed(summary, '%s could not be read: the Suricata rules left as they were' % config)
+    handle = locked()
+    if handle is None:
+        return failed(summary, 'another write of the Suricata rules held them past %g s: left as they were' % LOCK_WAIT)
+    with handle:
+        return produce(summary, conf, applied_from(conf), config, catalogue_path, path, template, state, ifconfig, pf)
+
+
+def refresh(config=None, catalogue_path=None, path=None, template=None, state=None, ifconfig=None, pf=None):
+    """The rules the last write applied, kept in suricata.json, resolved again - their sources' addresses and the
+    installed nDPI's names as they are now - and the file written when that changed it. A rule saved since and not
+    applied does not come in. With nothing applied kept - none written yet, or /var lost at a boot - as write()."""
+    config = config or tables.CONFIG
+    summary = {'status': 'ok', 'changed': False, 'lines': 0, 'rules': {}, 'path': path or RULES, 'at': int(time.time()),
+               'errors': []}
+    handle = locked()
+    if handle is None:
+        return failed(summary, 'another write of the Suricata rules held them past %g s: left as they were' % LOCK_WAIT)
+    with handle:
+        applied = load(state).get('applied')
+        rules = applied_rules(applied)
+        if rules is None:
+            conf = tables.settings(config)
+            if not conf['read']:
+                return failed(summary, '%s could not be read: the Suricata rules left as they were' % config)
+            applied = applied_from(conf)
+        else:
+            conf = {'classify': applied['classify'], 'rules': rules}
+        return produce(summary, conf, applied, config, catalogue_path, path, template, state, ifconfig, pf)
+
+
+def produce(summary, conf, applied, config, catalogue_path=None, path=None, template=None, state=None, ifconfig=None,
+            pf=None):
+    """The file made to say what the rules of conf give now, under the lock; what was applied kept with the summary."""
+    path, template = path or RULES, template or TEMPLATE
+    summary['applied'] = applied
     rules = []
     if conf['classify'] and any(rule['enabled'] for rule in conf['rules']):
         catalogue = tables.load_catalogue(catalogue_path or tables.CATALOGUE)
@@ -288,29 +419,25 @@ def write(config=None, catalogue_path=None, path=None, template=None, state=None
         own = tables.addresses(listed)
         if not own:
             # with no address of its own known, no line could leave the firewall out of its source and destination
-            summary.update({'status': 'failed', 'errors': ['the firewall\'s own addresses could not be read (%s -a): '
-                                                           'the Suricata rules left as they were' % (ifconfig or IFCONFIG)]})
-            return summary
+            return failed(summary, 'the firewall\'s own addresses could not be read (%s -a): the Suricata rules left as '
+                                   'they were' % (ifconfig or IFCONFIG))
         rules, summary['rules'] = build(conf, catalogue, devices, tables.device_networks(listed), pf or tables.Pf(),
                                         own)
     else:
-        summary['rules'] = {rule['uuid'] or str(rule['number']): {'number': rule['number'], 'lines': 0, 'reason': 'disabled'}
+        summary['rules'] = {key(rule): {'number': rule['number'], 'lines': 0, 'reason': 'disabled'}
                             for rule in conf['rules']}
     text = None
     while rules:
         try:
             text = render(rules, template)
         except Exception as error:                                       # noqa: BLE001
-            summary.update({'status': 'failed', 'errors': ['the template could not be rendered, the Suricata rules '
-                                                           'left as they were: %s' % error]})
-            return summary
+            return failed(summary, 'the template could not be rendered, the Suricata rules left as they were: %s' % error)
         long_ones = too_long(text)
         if not long_ones:
             break
         for rule in rules:
             if any(line['sid'] in long_ones for line in rule['lines']):
-                summary['rules'][rule['uuid'] or str(rule['number'])].update({'reason': 'too_long', 'lines': 0,
-                                                                              'sids': None})
+                summary['rules'][key(rule)].update({'reason': 'too_long', 'lines': 0, 'sids': None})
         rules = [rule for rule in rules if not any(line['sid'] in long_ones for line in rule['lines'])]
         text = None
     summary['lines'] = sum(len(rule['lines']) for rule in rules)
@@ -320,17 +447,23 @@ def write(config=None, catalogue_path=None, path=None, template=None, state=None
             summary['errors'].append(problem)
     elif current(path) != text:
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + '.new'
-            with open(tmp, 'w', encoding='utf-8') as handle:
-                handle.write(text)
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, path)
+            put(path, text)
             summary['changed'] = True
         except OSError as error:
-            summary.update({'status': 'failed', 'errors': ['%s could not be written: %s' % (path, error)]})
+            return failed(summary, '%s could not be written: %s' % (path, error))
     keep(summary, state)
     return summary
+
+
+def reload_ids(configctl=None):
+    """configctl ids reload - OPNsense's installRules.py, then Suricata told - after a start or a refresh changed the
+    file: 'ok', or why not."""
+    try:
+        done = subprocess.run([configctl or CONFIGCTL, 'ids', 'reload'], capture_output=True, text=True,
+                              timeout=RELOAD_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as error:
+        return 'configctl ids reload could not be run: %s' % error
+    return 'ok' if done.returncode == 0 else 'configctl ids reload ended with status %d' % done.returncode
 
 
 def main(argv):
@@ -338,14 +471,26 @@ def main(argv):
     try:
         if verb == 'write':
             print(json.dumps(write()))
+        elif verb in ('start', 'refresh'):
+            summary = write() if verb == 'start' else refresh()
+            if summary.get('changed'):
+                summary['reload'] = reload_ids()
+                if summary['reload'] != 'ok':
+                    summary['errors'].append(summary['reload'])
+            print(json.dumps(summary))
         elif verb == 'remove':
-            changed, problem = remove()
+            handle = locked()
+            changed, problem = remove() if handle is not None else (False, 'another write of the Suricata rules held '
+                                                                    'them past %g s: not removed' % LOCK_WAIT)
             summary = {'status': 'ok' if problem is None else 'failed', 'changed': changed, 'lines': 0, 'rules': {},
                        'errors': [problem] if problem else []}
-            keep(summary)
+            if handle is not None:
+                keep(summary)
+                handle.close()
             print(json.dumps(summary))
         else:
-            print(json.dumps({'status': 'failed', 'changed': False, 'errors': ['usage: suricata_rules.py write|remove']}))
+            print(json.dumps({'status': 'failed', 'changed': False,
+                              'errors': ['usage: suricata_rules.py write|start|refresh|remove']}))
     except Exception as error:                                           # noqa: BLE001
         # said, never raised: configd and the page read the answer
         print(json.dumps({'status': 'failed', 'changed': False, 'errors': ['the Suricata rules: %r' % error]}))
