@@ -2095,5 +2095,78 @@ with tempfile.TemporaryDirectory() as tmp:
           'given back to be emptied', ([(c['client'][0], c['rule']) for c in state.to_cut], emptied, state.devices),
           ([('198.51.100.130', R1)], ['appcontrol_YouTube'], {'lan': 'em1', 'opt2': 'em2'}))
 
+# --------------------------------------------------------------------------- what the page reads of the rules
+with tempfile.TemporaryDirectory() as tmp:
+    config = os.path.join(tmp, 'config.xml')
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><Firewall><Alias><aliases>' + ''.join(
+            '<alias><enabled>1</enabled><name>appcontrol_%s</name><type>external</type><description>Application Control: %s'
+            '</description></alias>' % (a, a) for a in ('YouTube', 'NetFlix')) + '</aliases></Alias></Firewall>'
+            '<IDS><general><enabled>1</enabled><mode>netmap</mode><interfaces>lan,opt2</interfaces></general></IDS>'
+            '<AppControl><general><classify>1</classify></general>' + RULES_XML + '</AppControl></OPNsense></opnsense>')
+    with open(os.path.join(tmp, 'status.json'), 'w') as handle:
+        json.dump({'rule_cut': {R1: 4}}, handle)
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'at': T0, 'lines': 37, 'rules': {R1: {'lines': 37, 'reason': None}, R4: {'lines': 0, 'reason': 'unread'}},
+                   'errors': []}, handle)
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump({'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TikTok': 'SocialNetwork', 'DNS': 'Network'}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'status.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules: each rule\'s state - acting, its table there; switched off; one the installed nDPI does not know; '
+          'not applied yet - and the connections cut for it, what its Suricata lines are',
+          {k[-1]: (v['state'], v['table'], v['cut'], (v['suricata'] or {}).get('lines'), (v['suricata'] or {}).get('reason'))
+           for k, v in found['rules'].items()},
+          {'1': ('active', 'appcontrol_YouTube', 4, 37, None), '2': ('active', 'appcontrol_NetFlix', 0, None, None),
+           '3': ('disabled', '', 0, None, None), '4': ('unknown_app', '', 0, 0, 'unread'), '5': ('disabled', '', 0, None, None),
+           '6': ('disabled', '', 0, None, None)})
+    check('status.py rules: the Intrusion Detection - on, IPS (netmap), its interfaces, Suricata not running; the rules '
+          'file\'s lines', (found['ids'], found['suricata']['lines']),
+          ({'enabled': True, 'mode': 'ips', 'interfaces': ['lan', 'opt2'], 'running': False}, 37))
+    with open(os.path.join(tmp, 'ndpi.json'), 'w') as handle:
+        json.dump({'protocols': {'YouTube': 'Media', 'NetFlix': 'Video', 'TLS': 'Web'}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'none.json'), os.path.join(tmp, 'ndpi.json'),
+                         os.path.join(tmp, 'none.pid'))
+    check('status.py rules: an application nDPI knows, its table not made yet - not applied yet; nothing cut nor written yet',
+          (found['rules'][R4]['state'], found['rules'][R4]['cut'], found['rules'][R4]['suricata'], found['suricata']['lines']),
+          ('pending', 0, None, 0))
+    check('status.py rules: the Intrusion Detection off, or IDS mode (pcap) - said', [status.ids(c, os.path.join(tmp, 'none.pid'))
+                                                                                       for c in (os.path.join(tmp, 'none.xml'),)],
+          [{'enabled': False, 'mode': 'ids', 'interfaces': [], 'running': False}])
+    with open(os.path.join(tmp, 'suricata.pid'), 'w') as handle:
+        handle.write(str(os.getpid()))
+    check('status.py rules: a pidfile naming a live process that is not Suricata - not running',
+          status.ids(config, os.path.join(tmp, 'suricata.pid'))['running'], False)
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><AppControl><general><classify>0</classify></general>' + RULES_XML +
+                     '</AppControl></OPNsense></opnsense>')
+    check('status.py rules: classifying off - every rule off', sorted({v['state'] for v in status.rules(
+        config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'none.json'), os.path.join(tmp, 'ndpi.json'),
+        os.path.join(tmp, 'none.pid'))['rules'].values()}), ['off'])
+    with open(config, 'w') as handle:
+        handle.write('<opnsense><OPNsense><Firewall><Alias><aliases><alias><enabled>1</enabled><name>appcontrol_YouTube</name>'
+                     '<type>external</type><description>Application Control: YouTube</description></alias></aliases></Alias>'
+                     '</Firewall><AppControl><general><classify>1</classify></general>' + RULES_XML +
+                     '</AppControl></OPNsense></opnsense>')
+    with open(os.path.join(tmp, 'status.json'), 'w') as handle:
+        json.dump({'totals': {'cut': 4}, 'apps': {'YouTube': {'category': 'Media', 'named': 5, 'cut': 4}}}, handle)
+    # pfctl -v -s rules: the rule of the guests' block, from their network
+    with open(os.path.join(tmp, 'rules.txt'), 'w') as handle:
+        handle.write('block drop in quick inet from (em2:network) to <appcontrol_YouTube:3> label "x"\n'
+                     '  [ Evaluations: 9         Packets: 6         Bytes: 360         States: 0     ]\n')
+    program(os.path.join(tmp, 'pfctl'), '#!/bin/sh\ncase "$*" in "-v -s rules") cat %s ;; esac\n'
+            % os.path.join(tmp, 'rules.txt'))
+    report = status.report(os.path.join(tmp, 'status.json'), config, os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'),
+                           os.path.join(tmp, 'pfctl'), os.path.join(tmp, 'none'), os.path.join(tmp, 'none.py'))
+    rows3 = {a['name']: a for a in report['apps']}
+    check('status.py: YouTube blocked by a rule alone - not for every device - its table, its block rules, the packets they '
+          'stopped; NetFlix of an Alert rule, its table not made yet',
+          ({k: rows3['YouTube'][k] for k in ('blocked', 'rules', 'ruled', 'table', 'packets', 'cut')},
+           {k: rows3['NetFlix'][k] for k in ('blocked', 'rules', 'ruled', 'table')}),
+          ({'blocked': False, 'rules': 1, 'ruled': True, 'table': 'appcontrol_YouTube', 'packets': 6, 'cut': 4},
+           {'blocked': False, 'rules': 0, 'ruled': True, 'table': ''}))
+    check('status.py: the blocking line - nothing blocked for every device, one block rule acting, its packets',
+          {k: report['blocking'][k] for k in ('apps', 'rules', 'packets')}, {'apps': [], 'rules': 1, 'packets': 6})
+
 print('%d of %d checks failed' % (failures, checks) if failures else '%d checks passed' % checks)
 sys.exit(1 if failures else 0)
