@@ -231,6 +231,11 @@ check('a protocol: the app-layer-protocol of Suricata\'s parser, on any IP proto
       [{'proto': 'ip', 'match': 'app-layer-protocol:ssh;', 'sid': 3990020001}])
 check('the four places of each name: tls, quic, http and dns', [l['proto'] for l in youtube['lines'][:4]],
       ['tls', 'quic', 'http', 'dns'])
+check('the http.host line a rule gets: no nocase, no /i - a rule with nocase on http.host Suricata refuses; the others '
+      'with them', ([l['match'] for l in youtube['lines'] if l['proto'] == 'http'][0],
+                    all(' nocase;' in l['match'] and '/i";' in l['match'] for l in youtube['lines'] if l['proto'] != 'http'),
+                    any(' nocase;' in l['match'] for l in youtube['lines'] if l['proto'] == 'http')),
+      (r'http.host; content:"googlevideo.com"; endswith; pcre:"/(?:^|\.)googlevideo\.com$/";', True, False))
 
 text = sr.render(built, TEMPLATE)
 lines = [line for line in text.splitlines() if line and not line.startswith('#')]
