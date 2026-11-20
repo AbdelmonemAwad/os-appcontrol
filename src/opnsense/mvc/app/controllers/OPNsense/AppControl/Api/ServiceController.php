@@ -25,6 +25,14 @@ class ServiceController extends ApiControllerBase
     }
 
     /**
+     * the Rules tab: what each rule does now, and the Intrusion Detection's state (status.py rules)
+     */
+    public function rulesAction()
+    {
+        return $this->json('rules');
+    }
+
+    /**
      * the Applications tab's grid: each application nDPI named since the classifier started, and each
      * one chosen in Settings, with its category and its table; and, for one blocked, the connections cut
      * and the packets its block rule stopped
@@ -48,6 +56,8 @@ class ServiceController extends ApiControllerBase
                 'entries' => isset($app['entries']) ? (int)$app['entries'] : null,
                 'blocked' => !empty($app['blocked']),
                 'block_pending' => !empty($app['block_pending']),
+                'ruled' => !empty($app['ruled']),
+                'rules' => (int)($app['rules'] ?? 0),
                 'cut' => (int)($app['cut'] ?? 0),
                 'packets' => isset($app['packets']) ? (int)$app['packets'] : null,
             ];
@@ -104,13 +114,15 @@ class ServiceController extends ApiControllerBase
     /**
      * the settings just saved put into the firewall: the aliases made to say what they say (aliases.php,
      * which reads the installed nDPI again first), the filter reloaded so pf holds their tables and the
-     * block rules of the applications blocked, cron so their Expire runs, the tables of aliases gone taken
-     * out of pf; then the classifier has its settings read again - started if it is not running - or is
-     * stopped, when classifying is off; and what was dropped in hardware for an application no longer
-     * blocked is handed back. Read again and not restarted: it keeps what it remembers, so an application
-     * blocked now has the connections it named as it cut at once. When the aliases could not be written
-     * nothing more is done, except that a classifier turned off is stopped all the same: off means it
-     * does not run.
+     * block rules of the applications blocked - for every device, or from a rule's source - cron so their
+     * Expire runs, the tables of aliases gone taken out of pf; the Suricata rules of the Rules tab written
+     * (suricata_rules.py) and, when they changed, the Intrusion Detection's rules installed again and
+     * Suricata told (ids reload); then the classifier has its settings read again - started if it is not
+     * running - or is stopped, when classifying is off; and what was dropped in hardware for an
+     * application no longer blocked is handed back. Read again and not restarted: it keeps what it
+     * remembers, so an application blocked now has the connections it named as it cut at once. When the
+     * aliases could not be written nothing more is done, except that classifying turned off stops the
+     * classifier and takes the Suricata rules away all the same: off means it does not act.
      */
     public function reconfigureAction()
     {
@@ -124,17 +136,36 @@ class ServiceController extends ApiControllerBase
             if (!$this->classifying()) {
                 $backend->configdRun('appcontrol stop');
                 $result['classify'] = false;
+                $result['suricata'] = $this->suricata($backend);
             }
             return $result;
         }
         $backend->configdRun('filter reload skip_alias');
         $backend->configdRun('cron restart');
         $result['gone_tables'] = json_decode((string)$backend->configdRun('appcontrol flush'), true);
+        $result['suricata'] = $this->suricata($backend);
         $on = $this->classifying();
         $backend->configdRun($on ? 'appcontrol reload' : 'appcontrol stop');
         $result['classify'] = $on;
         $result['released'] = json_decode((string)$backend->configdRun('appcontrol release'), true);
         return $result;
+    }
+
+    /**
+     * the Suricata rules of the Rules tab written as the settings say, and - when the file changed - the
+     * Intrusion Detection's rules installed again and Suricata told to read them (OPNsense's own ids reload:
+     * installRules.py, then its signal); suricata_rules.py's answer
+     */
+    private function suricata($backend)
+    {
+        $answer = json_decode((string)$backend->configdRun('appcontrol suricata'), true);
+        if (!is_array($answer)) {
+            return ['status' => 'failed', 'changed' => false, 'errors' => [gettext('No answer could be read.')]];
+        }
+        if (!empty($answer['changed'])) {
+            $backend->configdRun('ids reload');
+        }
+        return $answer;
     }
 
     /**

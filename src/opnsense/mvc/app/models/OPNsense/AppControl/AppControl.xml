@@ -66,5 +66,46 @@
                 <ValidationMessage>Seconds, 60 or more.</ValidationMessage>
             </ttl>
         </general>
+        <!--
+            The Rules tab (the plan's top-01): an application, from a source, and what is done with it. Block
+            gives a block rule of the plugin's on the application's table from the source
+            (plugins.inc.d/appcontrol.inc), cuts its connections from there (classify.py, cut.py) and writes a
+            Suricata rule that drops them; Alert writes a Suricata rule that alerts on them, and blocks
+            nothing (suricata_rules.py). The source is what OPNsense's own rules take for one; AppControl.php
+            refuses the firewall itself, its own tables, and an inverted source of more than one item.
+        -->
+        <rules>
+            <rule type="ArrayField">
+                <enabled type="BooleanField">
+                    <Required>Y</Required>
+                    <Default>1</Default>
+                </enabled>
+                <action type="OptionField">
+                    <Required>Y</Required>
+                    <Default>block</Default>
+                    <OptionValues>
+                        <block>Block</block>
+                        <alert>Alert</alert>
+                    </OptionValues>
+                </action>
+                <source type="NetworkAliasField">
+                    <Required>Y</Required>
+                    <Default>any</Default>
+                    <Multiple>Y</Multiple>
+                </source>
+                <source_not type="BooleanField">
+                    <Required>Y</Required>
+                    <Default>0</Default>
+                </source_not>
+                <app type="JsonKeyValueStoreField">
+                    <Required>Y</Required>
+                    <ConfigdPopulateAct>appcontrol apps</ConfigdPopulateAct>
+                    <SortByValue>Y</SortByValue>
+                </app>
+                <description type="DescriptionField">
+                    <Required>N</Required>
+                </description>
+            </rule>
+        </rules>
     </items>
 </model>
