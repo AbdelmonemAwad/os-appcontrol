@@ -25,6 +25,12 @@ categories", and -H, its help with the table of the protocols it knows - name, b
 ports a line. Their format here is the source's (nDPI de5c784, the package's own commit:
 ndpi_generate_options() and ndpi_dump_protocols()); it was not read on a box in phase 0, and
 categories.json, the same nDPI's categories, stands in when -a 1 gives nothing.
+
+And the names it knows applications by, for the Suricata rules of the Rules tab: --protos-dump 1, "Dump
+host-based protocolId", a header line and then one name and its protocol's id a line, a tab between
+(ndpiReader's hash_walker(), "%s\t%llu"; read on the second XGS 3300 in phase 0's L1 - 1,647 names on
+ndpi-6.0.d20260909,1). How nDPI matches them is its ac_domain_match_handler()'s (nDPI de5c784,
+ndpi_main.c), which suricata_rules.py follows.
 """
 
 import ipaddress
@@ -43,6 +49,9 @@ CARRIERS = ('TLS', 'QUIC', 'HTTP')
 
 OPTION = re.compile(r'<Option(\d+) value="(\d+)">([^<]*)</Option\d+>')
 PROTOCOL = re.compile(r'^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$')
+HOST = re.compile(r'^(\S+)\t(\d+)$')
+# a name as nDPI's host table writes one: letters, digits, dots, hyphens and _ alone
+HOST_NAME = re.compile(r'^[a-z0-9._-]{1,253}$')
 
 # two protocols every nDPI has, and the categories its own table gives them: a table read that says
 # otherwise was not read as nDPI writes it, and none of its categories is to be believed
@@ -176,6 +185,36 @@ def parse_protocols(text, categories):
                 out[found.group(3)] = word
                 break
     return out
+
+
+def parse_protocol_ids(text):
+    """{id: name} of the protocols of ndpiReader -H, read as parse_protocols() reads them."""
+    out = {}
+    for line in (text or '').splitlines():
+        if 'supported risks' in line:
+            break
+        found = PROTOCOL.match(line)
+        if found:
+            out[int(found.group(1))] = found.group(3)
+    return out
+
+
+def parse_hosts(text, ids):
+    """{protocol's name: [name]} of ndpiReader --protos-dump 1, the protocol's id read by ids (parse_protocol_ids());
+    each name lower case, once, in order. A line that is not a name and an id - the header - and a name of
+    characters nDPI's table does not write, or of an id -H does not list, are left out."""
+    out = {}
+    for line in (text or '').splitlines():
+        found = HOST.match(line.strip('\r'))
+        if not found:
+            continue
+        name, protocol = found.group(1).lower(), ids.get(int(found.group(2)))
+        if protocol is None or not HOST_NAME.match(name) or name.strip('.-') == '':
+            continue
+        names = out.setdefault(protocol, [])
+        if name not in names:
+            names.append(name)
+    return {protocol: sorted(names) for protocol, names in out.items()}
 
 
 def protocols_problem(protocols):

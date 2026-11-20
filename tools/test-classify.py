@@ -147,11 +147,26 @@ check('-H not believed: empty, or TLS or DNS in another category or none - said 
       ['ndpiReader -H gave no protocol', 'ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web',
        'ndpiReader -H was not read as nDPI writes it: DNS in no category, not Network'])
 
+ids = ndpi.parse_protocol_ids(open(os.path.join(FIX, 'ndpiReader-H.txt'), encoding='utf-8').read())
+check('-H: each protocol\'s id, Unknown\'s 0 too, before the table of risks - After_Risks, id 3 after it, not taken for '
+      'SMTP\'s 3', (len(ids), ids[0], ids[124], ids[3], ids[188]), (17, 'Unknown', 'YouTube', 'SMTP', 'QUIC'))
+hosts = ndpi.parse_hosts(open(os.path.join(FIX, 'ndpiReader-protos-dump-1.txt'), encoding='utf-8').read(), ids)
+check('--protos-dump 1: the names nDPI knows each application by, by the id -H gives it, each once, in order',
+      (hosts['YouTube'], hosts['NetFlix'], sorted(hosts)),
+      (['googlevideo.com', 'youtu.be', 'youtube-nocookie.', 'youtube-ui.l.google.com', 'youtube.', 'youtubeeducation.com',
+        'youtubei.googleapis.com', 'yt3.ggpht.com', 'ytimg.com'],
+       ['-nflxext.example', '-nflxtest.', 'netflix.com', 'nflxso-', 'nflxvideo.net'],
+       ['Canonical', 'Cloudflare', 'Dropbox', 'Mozilla', 'NetFlix', 'Twitch', 'Wikipedia', 'YouTube']))
+check('--protos-dump 1: a name in capitals lower case; the header, a line that is no name and an id, a name of other '
+      'characters, an empty one and one of an id -H does not list, left out',
+      hosts['Dropbox'], ['dropbox.com', 'dropboxstatic.com'])
+
 with tempfile.TemporaryDirectory() as tmp:
     fake = os.path.join(tmp, 'ndpiReader')
     with open(fake, 'w') as handle:
-        handle.write('#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
-                     % (os.path.join(FIX, 'ndpiReader-a1.txt'), os.path.join(FIX, 'ndpiReader-H.txt')))
+        handle.write('#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; --protos-dump) [ "$2" = 1 ] && cat %s ;; esac\n'
+                     % (os.path.join(FIX, 'ndpiReader-a1.txt'), os.path.join(FIX, 'ndpiReader-H.txt'),
+                        os.path.join(FIX, 'ndpiReader-protos-dump-1.txt')))
     os.chmod(fake, 0o755)
     pkg = os.path.join(tmp, 'pkg')
     with open(pkg, 'w') as handle:
@@ -159,23 +174,30 @@ with tempfile.TemporaryDirectory() as tmp:
     os.chmod(pkg, 0o755)
     out = apps.refresh(fake, os.path.join(tmp, 'ndpi.json'), pkg=pkg)
     saved = json.load(open(os.path.join(tmp, 'ndpi.json')))
-    check('apps.py refresh: the categories from -a 1, the protocols from -H, the version from pkg',
-          (out['categories_from'], len(saved['categories']), len(saved['protocols']), saved['version'], saved['reader'],
-           out['errors']), ('ndpiReader -a 1', 93, 16, '6.0.d20260909,1', '6.0.0', []))
+    check('apps.py refresh: the categories from -a 1, the protocols from -H, the names of the host table from '
+          '--protos-dump 1, the version from pkg',
+          (out['categories_from'], len(saved['categories']), len(saved['protocols']), len(saved['hosts']['YouTube']),
+           saved['version'], saved['reader'], out['errors']), ('ndpiReader -a 1', 93, 16, 9, '6.0.d20260909,1', '6.0.0', []))
     shifted = os.path.join(tmp, 'H.txt')
     with open(shifted, 'w') as handle:
         handle.write(open(os.path.join(FIX, 'ndpiReader-H.txt'), encoding='utf-8').read().replace(
             'Safe                  Web', 'Safe                  Media', 1))
-    program(os.path.join(tmp, 'shifted'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
-            % (os.path.join(FIX, 'ndpiReader-a1.txt'), shifted))
+    program(os.path.join(tmp, 'shifted'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; --protos-dump) cat %s ;; esac\n'
+            % (os.path.join(FIX, 'ndpiReader-a1.txt'), shifted, os.path.join(FIX, 'ndpiReader-protos-dump-1.txt')))
     out = apps.refresh(os.path.join(tmp, 'shifted'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
     check('apps.py refresh, -H giving TLS another category: said, for the page', out['errors'],
           ['ndpiReader -H was not read as nDPI writes it: TLS in Media, not Web'])
+    program(os.path.join(tmp, 'no-dump'), '#!/bin/sh\ncase "$1" in -a) cat %s ;; -H) cat %s ;; esac\n'
+            % (os.path.join(FIX, 'ndpiReader-a1.txt'), os.path.join(FIX, 'ndpiReader-H.txt')))
+    out = apps.refresh(os.path.join(tmp, 'no-dump'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
+    check('apps.py refresh, --protos-dump 1 giving no name: said - a Suricata rule then matches a protocol alone',
+          (out['errors'], json.load(open(os.path.join(tmp, 'ndpi.json')))['hosts']),
+          (['ndpiReader --protos-dump 1 gave no name: a Suricata rule matches a protocol alone'], {}))
     with open(fake, 'w') as handle:
         handle.write('#!/bin/sh\nexit 1\n')
     out = apps.refresh(fake, os.path.join(tmp, 'ndpi.json'), pkg=pkg)
-    check('apps.py refresh, nDPI answering nothing: categories.json stands in, and it is said',
-          (out['categories_from'], len(out['categories']), len(out['errors'])), ('categories.json', 93, 2))
+    check('apps.py refresh, nDPI answering nothing: categories.json stands in, and it is said - and that it gave no name',
+          (out['categories_from'], len(out['categories']), len(out['errors'])), ('categories.json', 93, 3))
     out = apps.refresh(os.path.join(tmp, 'none'), os.path.join(tmp, 'ndpi.json'), pkg=pkg)
     check('apps.py refresh, nDPI not installed: said, no protocol', (out['installed'], out['protocols']), (False, {}))
     check('apps.py list: name to name, for the field', apps.options({'protocols': {'b': 'Web', 'A': 'Web'}}),
