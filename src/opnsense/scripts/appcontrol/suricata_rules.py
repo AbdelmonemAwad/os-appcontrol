@@ -65,6 +65,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,10 @@ LOCK_WAIT = 300         # seconds a write waits for another - a refresh's ids re
 IFCONFIG = '/sbin/ifconfig'
 CONFIGCTL = '/usr/local/sbin/configctl'
 RELOAD_TIMEOUT = 300    # seconds configctl ids reload is given: installRules.py installs every rule again
+SURICATA = '/usr/local/bin/suricata'
+SURICATA_YAML = '/usr/local/etc/suricata/suricata.yaml'
+TEST_TIMEOUT = 180      # seconds Suricata's own test of a file is given (suricata -T)
+TEST_ROUNDS = 2         # tests of one file at most: the lines refused taken out, the rest tested again
 SID_BASE = 3990000000
 SID_SPAN = 10000
 MOST_RULES = 999
@@ -98,7 +103,57 @@ PROTOCOLS = {'TLS': 'tls', 'HTTP': 'http', 'DNS': 'dns', 'QUIC': 'quic', 'SSH': 
              'NFS': 'nfs', 'Kerberos': 'krb5', 'SMBv1': 'smb', 'SMBv23': 'smb', 'VNC': 'rfb', 'RDP': 'rdp', 'SIP': 'sip',
              'MQTT': 'mqtt', 'Modbus': 'modbus'}
 # why a rule gives no line, as the page says it
-REASONS = ('disabled', 'no_match', 'unread', 'empty', 'too_long', 'too_many')
+REASONS = ('disabled', 'no_match', 'unread', 'empty', 'too_long', 'too_many', 'refused')
+
+
+def engine_check(text, suricata=None, yaml=None, where=None):
+    """Suricata's own verdict on a file before it is installed, as suricata-update tests one: suricata -T -S <file>,
+    with OPNsense's own suricata.yaml - its parsers on or off as there - and the file's lines alone. (state,
+    {sid: what Suricata said}, message): 'ok'; 'refused' - those lines refused, as Suricata names them by their line
+    in the file; 'failed' - the test failed naming no line, message its last words; 'unchecked' - no Suricata or no
+    suricata.yaml here (the Intrusion Detection never set up), or the test could not run, message why. The file and
+    Suricata's log of the test go to a folder of their own in `where` (the state's), removed after."""
+    suricata, yaml, where = suricata or SURICATA, yaml or SURICATA_YAML, where or os.path.dirname(STATE)
+    if not os.access(suricata, os.X_OK) or not os.path.isfile(yaml):
+        return 'unchecked', {}, 'Suricata or its suricata.yaml is not there'
+    try:
+        os.makedirs(where, exist_ok=True)
+        folder = tempfile.mkdtemp(prefix='suricata-test.', dir=where)
+    except OSError as error:
+        return 'unchecked', {}, 'no folder for the test: %s' % error
+    try:
+        path = os.path.join(folder, 'appcontrol.rules')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        try:
+            done = subprocess.run([suricata, '-T', '-c', yaml, '-S', path, '-l', folder], capture_output=True, text=True,
+                                  errors='replace', timeout=TEST_TIMEOUT, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as error:
+            return 'unchecked', {}, 'suricata -T could not be run: %s' % error
+        said = '\n'.join([done.stdout or '', done.stderr or '', current(os.path.join(folder, 'suricata.log')) or ''])
+        lines = text.splitlines()
+        refused = {}
+        output = said.splitlines()
+        at_line = re.compile(r'\bfrom file %s at line (\d+)' % re.escape(path))
+        for i, line in enumerate(output):
+            found = at_line.search(line)
+            number = int(found.group(1)) if found else 0
+            sid = re.search(r'\bsid:(\d+);', lines[number - 1]) if 1 <= number <= len(lines) else None
+            if not sid:
+                continue
+            # Suricata says why on the line before - an unknown keyword, a protocol whose parser is off - then which
+            # signature, the whole of it: that one is written short, without the signature and the test's folder
+            why = output[i - 1].strip() if i and 'error parsing signature' not in output[i - 1] else ''
+            which = re.sub(r'signature ".*" from file', 'signature from file', line).replace(path, 'appcontrol.rules')
+            refused[int(sid.group(1))] = MSG_SPACE.sub(' ', (why + ' - ' if why else '') + which.strip())[:300]
+        if refused:
+            return 'refused', refused, None
+        if done.returncode == 0:
+            return 'ok', {}, None
+        last = [line.strip() for line in said.splitlines() if line.strip()][-2:]
+        return 'failed', {}, ' / '.join(last)[:400] or 'suricata -T ended with status %d' % done.returncode
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def name_match(name, keyword, nocase):
@@ -136,7 +191,17 @@ def destination(own, connected):
 
 
 def negated(excepted):
-    """Suricata's addresses for every address but `excepted` (networks, collapsed)."""
+    """Suricata's addresses for every address but `excepted` (networks, collapsed): ![...]; or, when they hold the whole
+    of one family - which Suricata refuses negated ("Complete IP space negated") - the other family's whole space
+    less its own exceptions; or None when they hold both families whole: no address is left, as pf's !<table> of
+    such an alias blocks nobody either."""
+    whole = {n.version for n in excepted if n.prefixlen == 0}
+    if whole == {4, 6}:
+        return None
+    if whole:
+        left = 6 if 4 in whole else 4
+        rest = ''.join(',!' + address(n) for n in excepted if n.version == left)
+        return '[%s%s]' % ('::/0' if left == 6 else '0.0.0.0/0', rest)
     return '![%s]' % ','.join(address(n) for n in excepted)
 
 
@@ -169,7 +234,8 @@ def source_of(rule, found, own=()):
         if anything:
             return None, 'empty', ''
         excepted = tables.flatten([(n, False) for n in nets + mine])
-        return (negated(excepted) if excepted else 'any'), None, ''
+        where = negated(excepted) if excepted else 'any'
+        return (where, None, '') if where else (None, 'empty', '')
     if anything:
         return ('![%s]' % ','.join(address(n) for n in mine) if mine else 'any'), None, ''
     # a network the firewall's own addresses fill is no device's; one holding one of them takes it as an exception
@@ -433,19 +499,48 @@ def produce(summary, conf, applied, config, catalogue_path=None, path=None, temp
     else:
         summary['rules'] = {key(rule): {'number': rule['number'], 'lines': 0, 'reason': 'disabled'}
                             for rule in conf['rules']}
-    text = None
+    text, rounds, before = None, 0, current(path)
+    # Suricata's verdict on the file as it is, kept from the write that tested it while nothing new is to be tested
+    kept = load(state).get('engine')
+    summary['engine'] = kept if isinstance(kept, dict) and before is not None else {'state': 'unchecked', 'refused': 0,
+                                                                                     'message': None}
     while rules:
         try:
             text = render(rules, template)
         except Exception as error:                                       # noqa: BLE001
             return failed(summary, 'the template could not be rendered, the Suricata rules left as they were: %s' % error)
         long_ones = too_long(text)
-        if not long_ones:
+        if long_ones:
+            for rule in rules:
+                if any(line['sid'] in long_ones for line in rule['lines']):
+                    summary['rules'][key(rule)].update({'reason': 'too_long', 'lines': 0, 'sids': None})
+            rules = [rule for rule in rules if not any(line['sid'] in long_ones for line in rule['lines'])]
+            text = None
+            continue
+        if text == before or rounds >= TEST_ROUNDS:
+            break
+        # Suricata's own test of what is new to it: a line it refuses is taken out, said, and the rest tested again
+        rounds += 1
+        state_now, refused, why = engine_check(text, where=os.path.dirname(state or STATE))
+        total = (summary['engine']['refused'] if rounds > 1 else 0) + len(refused)
+        # the rest taken once those refused are out: 'refused' says some were. While some are, every look tests again
+        # what it would write with them - Suricata's parsers can be switched on since
+        summary['engine'] = {'state': 'refused' if total and state_now == 'ok' else state_now, 'refused': total,
+                             'message': why}
+        if not refused:
             break
         for rule in rules:
-            if any(line['sid'] in long_ones for line in rule['lines']):
-                summary['rules'][key(rule)].update({'reason': 'too_long', 'lines': 0, 'sids': None})
-        rules = [rule for rule in rules if not any(line['sid'] in long_ones for line in rule['lines'])]
+            gone = [line for line in rule['lines'] if line['sid'] in refused]
+            if not gone:
+                continue
+            said = summary['rules'][key(rule)]
+            said['refused'] = said.get('refused', 0) + len(gone)
+            said['refused_by'] = refused[gone[0]['sid']]
+            rule['lines'] = [line for line in rule['lines'] if line['sid'] not in refused]
+            said['lines'] = len(rule['lines'])
+            if not rule['lines']:
+                said.update({'reason': 'refused', 'sids': None})
+        rules = [rule for rule in rules if rule['lines']]
         text = None
     summary['lines'] = sum(len(rule['lines']) for rule in rules)
     if text is None:

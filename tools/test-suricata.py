@@ -172,7 +172,8 @@ class Tables:
 PF = tables.Pf(run=Tables({'Teachers': ['192.0.2.40', '192.0.2.41'], 'Wing': ['192.0.2.0/25', '!192.0.2.64/26',
                                                                                 '192.0.2.70'],
                            'Empty': [], 'Big': ['198.51.100.%d' % i for i in range(256)] +
-                           ['2001:db8:%x::1' % i for i in range(600)]}))
+                           ['2001:db8:%x::1' % i for i in range(600)],
+                           'All': ['0.0.0.0/0', '::/0'], 'All4': ['0.0.0.0/0']}))
 
 
 def rule(**more):
@@ -237,6 +238,11 @@ check('no source holds an address of the firewall\'s own, as Suricata reads it; 
            (['any'], False, '203.0.113.9'), (['lan'], False, '192.0.2.10'), (['lan'], False, '2001:db8:1::10'),
            (['opt2'], False, '198.51.100.130'), (['Teachers'], True, '192.0.2.10'), (['Teachers'], True, '192.0.2.40'))]),
       ([], [True, True, True, True, True, False]))
+check('inverted, an alias holding every address - no device left, and Suricata refuses a group that negates the whole '
+      'space: no line; holding every IPv4 address - every IPv6 one but the firewall\'s, written without a negated whole',
+      [sr.source(rule(source=['All'], **{'not': True}), DEVICES, BY_DEV, PF, OWN)[:2],
+       sr.source(rule(source=['All4'], **{'not': True}), DEVICES, BY_DEV, PF, OWN)[:2]],
+      [(None, 'empty'), ('[::/0,!2001:db8:1::1,!fe80::11]', None)])
 DEST = sr.destination(OWN, [n for nets in BY_DEV.values() for n in nets])
 check('the destination: the internet alone - every address but the firewall\'s own, its networks, the private, shared, '
       'loopback, link-local, documentation and unique-local ones, multicast and the reserved block',
@@ -501,6 +507,72 @@ with tempfile.TemporaryDirectory() as tmp:
     check('one writer at a time: another holding the lock past the wait - Apply\'s write, a refresh - nothing written, said',
           (summary['status'], again['status'], open(rules_file).read() == before, summary['errors']),
           ('failed', 'failed', True, ['another write of the Suricata rules held them past 0.5 s: left as they were']))
+
+    # Suricata's own test of a file before it is installed (suricata -T -S), a stand-in refusing what holds a word
+    engine_calls = os.path.join(tmp, 'engine-calls')
+    refuse = os.path.join(tmp, 'refuse')
+    program(os.path.join(tmp, 'suricata-bin'), '#!/usr/bin/env python3\nimport os, sys\na = sys.argv[1:]\n'
+            'open(%r, "a").write(" ".join(a) + "\\n")\nrules = a[a.index("-S") + 1]\n'
+            'word = open(%r).read().strip() if os.path.exists(%r) else ""\nbad = 0\n'
+            'for n, line in enumerate(open(rules).read().splitlines(), 1):\n'
+            '    if word == "everything":\n        continue\n'
+            '    if word and word in line:\n'
+            '        bad += 1\n        sys.stderr.write("E: detect-parse: the reason a stand-in gives\\n")\n'
+            '        sys.stderr.write("E: detect: error parsing signature \\"%%s\\" from file %%s at line %%d\\n"'
+            ' %% (line, rules, n))\n'
+            'if word == "everything":\n    sys.stderr.write("E: conf: the configuration could not be read\\n")\n    sys.exit(1)\n'
+            'if bad:\n    sys.exit(1)\nprint("Notice: suricata: Configuration provided was successfully loaded. Exiting.")\n'
+            % (engine_calls, refuse, refuse))
+    with open(os.path.join(tmp, 'suricata.yaml'), 'w') as handle:
+        handle.write('%YAML 1.1\n---\n')
+    sr.SURICATA, sr.SURICATA_YAML = os.path.join(tmp, 'suricata-bin'), os.path.join(tmp, 'suricata.yaml')
+    with open(refuse, 'w') as handle:
+        handle.write('app-layer-protocol:modbus')
+    with_modbus = two + rule_xml(U[5], 'Modbus', 'any', action='alert')
+    summary = write(rules_xml=with_modbus)
+    text = open(rules_file).read()
+    asked = open(engine_calls).read().splitlines()
+    check('Suricata\'s own test of a new file: suricata -T with OPNsense\'s suricata.yaml, the file alone (-S), its log '
+          'apart; the line it refuses taken out - a parser off in suricata.yaml, say - said for its rule, the rest written',
+          (asked[0].split()[:3], asked[0].split()[3], asked[0].split()[4].endswith('/appcontrol.rules'), len(asked),
+           summary['engine'], summary['rules'][U[5]]['reason'], summary['rules'][U[5]]['refused'],
+           'app-layer-protocol:modbus' in text, 'app-layer-protocol:ssh' in text, summary['lines']),
+          (['-T', '-c', sr.SURICATA_YAML], '-S', True, 2, {'state': 'refused', 'refused': 1, 'message': None}, 'refused', 1,
+           False, True, 37))
+    said_of = summary['rules'][U[5]]['refused_by']
+    check('what Suricata said of the line it refused, kept for the page: why, on the line before, then which line - the '
+          'signature itself and the test\'s folder left out', (said_of.startswith(
+              'E: detect-parse: the reason a stand-in gives - E: detect: error parsing signature from file appcontrol.rules '
+              'at line '), 'suricata-test.' in said_of, 'alert ip' in said_of), (True, False, False))
+    check('the test\'s own folder gone once it has run', [n for n in os.listdir(tmp) if n.startswith('suricata-test.')], [])
+    os.remove(engine_calls)
+    summary = refresh()
+    check('a refresh with a line refused before: tested again - a parser switched on since takes it - and nothing changed, '
+          'said', (summary['changed'], summary['engine']['state'], len(open(engine_calls).read().splitlines())),
+          (False, 'refused', 1))
+    os.remove(refuse)
+    os.remove(engine_calls)
+    summary = refresh()
+    check('the parser on since: the line taken, the file changed', (summary['changed'], summary['engine'],
+                                                                    'app-layer-protocol:modbus' in open(rules_file).read()),
+          (True, {'state': 'ok', 'refused': 0, 'message': None}, True))
+    os.remove(engine_calls)
+    summary = refresh()
+    check('nothing new to test: Suricata not asked, its verdict kept', (summary['changed'], summary['engine']['state'],
+                                                                        os.path.exists(engine_calls)), (False, 'ok', False))
+    with open(refuse, 'w') as handle:
+        handle.write('everything')
+    summary = write(rules_xml=two)
+    check('the test failing without naming a line: the file written as it is, Suricata\'s last words said',
+          (summary['changed'], summary['engine']), (True, {'state': 'failed', 'refused': 0,
+                                                           'message': 'E: conf: the configuration could not be read'}))
+    os.remove(refuse)
+    os.remove(sr.SURICATA_YAML)
+    summary = write(rules_xml=with_modbus)
+    check('no suricata.yaml - the Intrusion Detection never set up: not tested, said so', (summary['changed'],
+                                                                                          summary['engine']['state']),
+          (True, 'unchecked'))
+    sr.SURICATA = os.path.join(tmp, 'no-suricata')
 
     # the command line, with its own places
     sr.RULES, sr.STATE, sr.TEMPLATE, sr.IFCONFIG = rules_file, state, TEMPLATE, ifconfig

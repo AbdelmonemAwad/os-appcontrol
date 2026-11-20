@@ -123,7 +123,8 @@ def rules(config=tables.CONFIG, status_path=STATUS, suricata_path=SURICATA, cata
     table not made, Apply needed; 'unread' - its source cannot be read now, inverted or every element of it, so
     it acts on no device; 'empty' - its source holds no device's address now; 'active'. gone: the rules applied
     and switched on that are deleted since - they act until Apply. cut: the connections cut for it since the
-    classifier started; suricata: what suricata_rules.py last wrote for it - its lines, or why none."""
+    classifier started; suricata: what suricata_rules.py last wrote for it - its lines, those Suricata refused, or
+    why none - and, for the file, Suricata's own test of it (engine)."""
     conf = tables.settings(config)
     aliases = tables.present(config)
     known = (tables.load_catalogue(catalogue_path).get('protocols') or {})
@@ -152,7 +153,8 @@ def rules(config=tables.CONFIG, status_path=STATUS, suricata_path=SURICATA, cata
     gone = sum(1 for key, rule in (applied or {}).items() if key not in out and rule['enabled']) \
         if conf['classify'] and applied is not None and kept.get('classify') is True else 0
     return {'rules': out, 'gone': gone, 'ids': ids(config, ids_pidfile),
-            'suricata': {'at': written.get('at'), 'lines': written.get('lines', 0), 'errors': written.get('errors') or []}}
+            'suricata': {'at': written.get('at'), 'lines': written.get('lines', 0), 'errors': written.get('errors') or [],
+                         'engine': written.get('engine') if isinstance(written.get('engine'), dict) else None}}
 
 
 def entries(pfctl=tables.PFCTL):

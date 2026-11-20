@@ -2215,6 +2215,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check('status.py rules: a rule in force whose source cannot be read now - an alias gone - acts on no device; one whose '
           'source holds no device\'s address now - an interface without one - neither; nothing deleted since',
           (found['rules'][R1]['state'], found['rules'][R2]['state'], found['gone']), ('unread', 'empty', 0))
+    with open(os.path.join(tmp, 'suricata.json'), 'w') as handle:
+        json.dump({'rules': {R1: {'lines': 35, 'refused': 1, 'refused_by': 'E: why'}}, 'engine': {
+            'state': 'refused', 'refused': 1, 'message': None}, 'applied': {'classify': True, 'rules': now_rules}}, handle)
+    found = status.rules(config, os.path.join(tmp, 'none.json'), os.path.join(tmp, 'suricata.json'),
+                         os.path.join(tmp, 'ndpi.json'), os.path.join(tmp, 'none.pid'))
+    check('status.py rules: Suricata\'s own test of the file, and the lines of a rule it refused, passed on to the page',
+          (found['suricata']['engine'], found['rules'][R1]['suricata']['refused']),
+          ({'state': 'refused', 'refused': 1, 'message': None}, 1))
     youtube_rule = now_rules[0]
     check('status.py rules: part of a source not read - the rest acts; inverted, one element not read - it acts on none',
           [status.rule_state(dict(youtube_rule, source=s, **{'not': n}), {'classify': True}, None, {'unread': u},

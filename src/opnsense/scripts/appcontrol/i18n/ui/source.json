@@ -163,6 +163,7 @@
  "Streaming",
  "Suricata rules",
  "Suricata rules written for the Rules tab",
+ "Suricata's own test of the rules of the Rules tab failed: %s",
  "Switched off, the rule does nothing, and keeps its place.",
  "System",
  "Table",
@@ -210,6 +211,7 @@
  "nDPI is not installed",
  "nDPI is not installed: package ndpi is needed.",
  "no Suricata rule: Suricata cannot tell this application",
+ "no Suricata rule: Suricata refused its lines",
  "no Suricata rule: its source could not be read",
  "no Suricata rule: its source holds no address now",
  "no Suricata rule: its source is too long for one",
@@ -223,6 +225,7 @@
  "packets stopped",
  "packets stopped since the rules were last loaded",
  "pf alone holds these tables: without os-xgs-npu no hardware takes part.",
+ "refused by Suricata",
  "since",
  "switched off",
  "windows cut short: connections past the packets, connections or bytes a window reads were not classified"

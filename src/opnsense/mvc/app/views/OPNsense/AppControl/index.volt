@@ -392,7 +392,8 @@
             'unread': "{{ lang._('no Suricata rule: its source could not be read') }}",
             'empty': "{{ lang._('no Suricata rule: its source holds no address now') }}",
             'too_long': "{{ lang._('no Suricata rule: its source is too long for one') }}",
-            'too_many': "{{ lang._('no Suricata rule: too many rules') }}"
+            'too_many': "{{ lang._('no Suricata rule: too many rules') }}",
+            'refused': "{{ lang._('no Suricata rule: Suricata refused its lines') }}"
         };
         const network_names = {};
 
@@ -435,6 +436,11 @@
                         } else if (suricata_reasons[row.suricata_reason]) {
                             parts.push(suricata_reasons[row.suricata_reason]);
                         }
+                        if (row.suricata_refused > 0) {
+                            /* the lines Suricata's own test refused, kept out of the file; what it said, on hover */
+                            parts.push('<span class="text-warning" title="' + esc(row.suricata_refused_by) + '">' +
+                                count(row.suricata_refused) + ' ' + "{{ lang._('refused by Suricata') }}" + '</span>');
+                        }
                         return parts.join(' · ');
                     }
                 }
@@ -463,6 +469,12 @@
             if (ids && ids.enabled && Array.isArray(ids.interfaces) && ids.interfaces.length &&
                     !(Array.isArray(ids.internal) && ids.internal.length)) {
                 text += ' ' + plain("{{ lang._('None of them is an internal interface: after NAT, Suricata sees no device\'s own IPv4 address there.') }}");
+            }
+            /* Suricata's own test of the rules file, failing without naming a line: what it said */
+            const engine = data && data.suricata && data.suricata.engine ? data.suricata.engine : null;
+            if (engine && engine.state === 'failed') {
+                text += (text ? ' ' : '') + plain("{{ lang._('Suricata\'s own test of the rules of the Rules tab failed: %s') }}")
+                    .replace('%s', String(engine.message || '-'));
             }
             $('#ac-ids').text(text).toggle(text !== '');
             const gone = data && Number(data.gone) > 0 ? Number(data.gone) : 0;

@@ -42,6 +42,8 @@ class SettingsController extends ApiMutableModelControllerBase
             $result['rows'][$i]['cut'] = (int)($found['cut'] ?? 0);
             $result['rows'][$i]['suricata_lines'] = (int)($suricata['lines'] ?? 0);
             $result['rows'][$i]['suricata_reason'] = (string)($suricata['reason'] ?? '');
+            $result['rows'][$i]['suricata_refused'] = (int)($suricata['refused'] ?? 0);
+            $result['rows'][$i]['suricata_refused_by'] = (string)($suricata['refused_by'] ?? '');
         }
         return $result;
     }

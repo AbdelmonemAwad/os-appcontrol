@@ -309,16 +309,20 @@ namespace {
         }
     }]];
     Backend::$answers = ['appcontrol rules' => json_encode(['rules' => [
-        'u1' => ['state' => 'active', 'cut' => 4, 'suricata' => ['lines' => 36, 'reason' => null]],
+        'u1' => ['state' => 'active', 'cut' => 4, 'suricata' => ['lines' => 36, 'reason' => null, 'refused' => 2,
+            'refused_by' => 'E: detect-parse: why']],
         'u2' => ['state' => 'pending', 'cut' => 0, 'suricata' => ['lines' => 0, 'reason' => 'no_match']]]])];
     ApiMutableModelControllerBase::$calls = [];
     $grid = (new SettingsController())->searchRuleAction();
     check(ApiMutableModelControllerBase::$calls[0] === ['searchBase', 'rules.rule', ['enabled', 'action', 'source', 'source_not',
         'app', 'description']], 'the Rules grid: the model\'s rules.rule, its columns');
     check(array_map(function ($r) {
-        return [$r['uuid'], $r['action_key'], $r['source_key'], $r['state'], $r['cut'], $r['suricata_lines'], $r['suricata_reason']];
-    }, $grid['rows']) === [['u1', 'block', 'opt2', 'active', 4, 36, ''], ['u2', 'alert', 'any', 'pending', 0, 0, 'no_match']],
-        'the Rules grid: each rule\'s action and source as stored, its state, the connections cut for it, its Suricata lines or why none');
+        return [$r['uuid'], $r['action_key'], $r['source_key'], $r['state'], $r['cut'], $r['suricata_lines'], $r['suricata_reason'],
+            $r['suricata_refused'], $r['suricata_refused_by']];
+    }, $grid['rows']) === [['u1', 'block', 'opt2', 'active', 4, 36, '', 2, 'E: detect-parse: why'],
+        ['u2', 'alert', 'any', 'pending', 0, 0, 'no_match', 0, '']],
+        'the Rules grid: each rule\'s action and source as stored, its state, the connections cut for it, its Suricata lines or ' .
+        'why none, and those Suricata\'s own test refused, with what it said');
     Backend::$answers = [];
     $grid = (new SettingsController())->searchRuleAction();
     check($grid['rows'][0]['state'] === '' && $grid['rows'][0]['cut'] === 0 && $grid['rows'][0]['suricata_reason'] === '',
