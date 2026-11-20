@@ -18,14 +18,16 @@ out, inverted - and why one cannot be written: not read, holding no address, too
 taken out of every source - any, inverted, a network holding one as an exception, one written alone no device's -
 and every line's destination the internet alone, none of the firewall's addresses, its networks or the blocks that
 are not the internet's, as Suricata reads an address group; its addresses not to be read, the file left as it was;
-the message, what Suricata
-takes in one; each rule's lines - its protocol when Suricata reads it, its names, drop for Block and alert for
-Alert, the sids its number gives - or why none: switched off, nothing Suricata can tell, past 999 rules; the
+the message, what Suricata takes in one; each rule's lines - its protocol when Suricata reads it, its names, drop
+for Block and alert for Alert, each line's sid from a hash of its rule's uuid and its match, kept as the rules
+change around it, two meeting taking the next free - or why none: switched off, nothing Suricata can tell, more
+lines than a rule takes; the
 template rendered - one comment line for each rule, then its lines, each well formed, under Suricata's limit, its
 sid its own; the file written in one step, not again when nothing changed, removed when classifying is off or no
 rule gives a line; config.xml or the template not to be read leaving the file as it was; a line past the limit
 taking its rule out, said; the command line's answers, never a fault raised.
 """
+import hashlib
 import json
 import os
 import re
@@ -282,14 +284,22 @@ RULES = [rule(number=1, uuid=U[1], app='YouTube', source=['opt2'], description='
          rule(number=3, uuid=U[3], app='Mozilla', enabled=False),
          rule(number=4, uuid=U[4], app='Example_Env'),
          rule(number=5, uuid=U[5], app='YouTube', source=['Gone']),
-         rule(number=6, uuid=U[6], app='TLS', source=['Teachers'], **{'not': True}),
-         rule(number=1000, uuid=U[7], app='YouTube')]
+         rule(number=6, uuid=U[6], app='TLS', source=['Teachers'], **{'not': True})]
 built, report = sr.build({'rules': RULES}, CATALOGUE, DEVICES, BY_DEV, PF, OWN)
 check('each rule: YouTube from the guests - its 9 names, 4 places each; SSH - its protocol; one switched off; one whose '
-      'application Suricata cannot tell; one whose source is not read; TLS from all but Teachers - its protocol; one past '
-      'the 999th', {k[-1]: (v['lines'], v['names'], v['protocol'], v['reason']) for k, v in report.items()},
+      'application Suricata cannot tell; one whose source is not read; TLS from all but Teachers - its protocol',
+      {k[-1]: (v['lines'], v['names'], v['protocol'], v['reason']) for k, v in report.items()},
       {'1': (36, 9, None, None), '2': (1, 0, 'ssh', None), '3': (0, 0, None, 'disabled'), '4': (0, 0, None, 'no_match'),
-       '5': (0, 9, None, 'unread'), '6': (1, 0, 'tls', None), '7': (0, 0, None, 'too_many')})
+       '5': (0, 9, None, 'unread'), '6': (1, 0, 'tls', None)})
+kept_most = sr.MOST_LINES
+sr.MOST_LINES = 35
+try:
+    _many, many_said = sr.build({'rules': [rule(number=1001, uuid=U[7], app='YouTube'), rule(number=1002, uuid=U[8], app='SSH')]},
+                                CATALOGUE, DEVICES, BY_DEV, PF, OWN)
+finally:
+    sr.MOST_LINES = kept_most
+check('a rule giving more lines than MOST_LINES: none, said; any number of rules - the 1,001st and the 1,002nd give theirs',
+      [(many_said[u]['lines'], many_said[u]['reason']) for u in (U[7], U[8])], [(0, 'too_many'), (1, None)])
 check('a source not read: which element', report[U[5]].get('element'), 'Gone')
 _built, said_more = sr.build({'rules': [rule(number=1, uuid=U[1], app='Example_Env', source=['Gone']),
                                         rule(number=2, uuid=U[2], app='YouTube', source=['opt3']),
@@ -307,12 +317,36 @@ check('Block: drop, from the guests\' network but the firewall\'s address there;
       [('drop', '[198.51.100.128/25,!198.51.100.129]', 'opt2'), ('alert', '![192.0.2.1,198.51.100.129,2001:db8:1::1,fe80::11]',
                                                                   'any'),
        ('drop', '![192.0.2.1,192.0.2.40/31,198.51.100.129,2001:db8:1::1,fe80::11]', 'not Teachers')])
-check('the sids: SID_BASE, the rule\'s number times SID_SPAN, then one a line - under OPNsense\'s own user rules, which '
-      'count down from 4294967294', ([l['sid'] for l in youtube['lines']][:3], report[U[1]]['sids'],
-                                     report[U[6]]['sids'], sr.SID_BASE + sr.MOST_RULES * sr.SID_SPAN + sr.SID_SPAN < 4294967294 - 10000),
-      ([3990010001, 3990010002, 3990010003], [3990010001, 3990010036], [3990060001, 3990060001], True))
+
+
+def hashed_sid(rule_key, match):
+    """A line's sid as the test writes it again: SID_BASE plus sha256 of the rule's uuid and its match, within SID_RANGE."""
+    return sr.SID_BASE + int(hashlib.sha256(('%s\0%s' % (rule_key, match)).encode('utf-8')).hexdigest()[:15], 16) % sr.SID_RANGE
+
+
+all_sids = [line['sid'] for r in built for line in r['lines']]
+check('the sids: each line\'s from a hash of its rule\'s uuid and what it matches, each its own, between SID_BASE and '
+      'SID_BASE + SID_RANGE - under OPNsense\'s own user rules, which count down from 4294967294',
+      ([line['sid'] for line in youtube['lines']][:2] == [hashed_sid(U[1], line['match']) for line in youtube['lines']][:2],
+       len(set(all_sids)) == len(all_sids), all(sr.SID_BASE <= s < sr.SID_BASE + sr.SID_RANGE for s in all_sids),
+       sr.SID_BASE + sr.SID_RANGE < 4294967294 - 1000000), (True, True, True, True))
 check('a protocol: the app-layer-protocol of Suricata\'s parser, on any IP protocol', built[1]['lines'],
-      [{'proto': 'ip', 'match': 'app-layer-protocol:ssh;', 'sid': 3990020001}])
+      [{'proto': 'ip', 'match': 'app-layer-protocol:ssh;', 'sid': hashed_sid(U[2], 'app-layer-protocol:ssh;')}])
+moved, _said = sr.build({'rules': [dict(r, number=r['number'] - 1) for r in RULES[1:]]},
+                        dict(CATALOGUE, hosts=dict(HOSTS_TABLE, TLS=['tlsnew.example'])), DEVICES, BY_DEV, PF, OWN)
+check('a line keeps its sid as the rules change around it - the rule before it deleted, every rule a place back, the '
+      'installed nDPI giving another application a name: an Intrusion Detection change by sid stays with its line',
+      ([line['sid'] for line in moved[0]['lines']] == [line['sid'] for line in built[1]['lines']],
+       moved[1]['lines'][0]['sid'] == built[2]['lines'][0]['sid']), (True, True))
+kept_range = sr.SID_RANGE
+sr.SID_RANGE = 7
+try:
+    crowded, _said = sr.build({'rules': RULES[:2]}, dict(CATALOGUE, hosts={'YouTube': ['a.example']}), DEVICES, BY_DEV, PF, OWN)
+finally:
+    sr.SID_RANGE = kept_range
+crowded_sids = [line['sid'] for r in crowded for line in r['lines']]
+check('two lines meeting on one sid: the later takes the next one free - each its own still', (len(crowded_sids),
+                                                                                              len(set(crowded_sids))), (5, 5))
 check('the four places of each name: tls, quic, http and dns', [l['proto'] for l in youtube['lines'][:4]],
       ['tls', 'quic', 'http', 'dns'])
 check('the http.host line a rule gets: no nocase, no /i - a rule with nocase on http.host Suricata refuses; the others '
@@ -341,7 +375,7 @@ check('a rule\'s comment line with an application or a source written in config.
 check('a line as Suricata reads one', lines[0],
       r'drop tls [198.51.100.128/25,!198.51.100.129] any -> ' + DEST + r' any (msg:"Application Control: block YouTube - '
       r'guests"; flow:to_server; tls.sni; content:"googlevideo.com"; nocase; endswith; pcre:"/(?:^|\.)googlevideo\.com$/i"; '
-      r'threshold:type limit,track by_src,count 1,seconds 60; sid:3990010001; rev:1;)')
+      r'threshold:type limit,track by_src,count 1,seconds 60; sid:%d; rev:1;)' % youtube['lines'][0]['sid'])
 RULE_LINE = re.compile(r'^(drop|alert) (tls|quic|http|dns|ip) (any|!?\[[0-9a-f.:/,!]+\]) any -> (!\[[0-9a-f.:/,]+\]) any '
                        r'\((.*)\)$')
 check('every line: its destination the internet alone - none of the firewall\'s addresses, its networks, a private, '
@@ -402,7 +436,7 @@ with tempfile.TemporaryDirectory() as tmp:
                                                                                if line.startswith('alert')][0],
           'alert ip ![192.0.2.1,198.51.100.129,2001:db8:1::1,fe80::11] any -> ' + DEST + ' any (msg:"Application Control: '
           'alert SSH"; flow:to_server; app-layer-protocol:ssh; threshold:type limit,track by_src,count 1,seconds 60; '
-          'sid:3990020001; rev:1;)')
+          'sid:%d; rev:1;)' % hashed_sid(U[2], 'app-layer-protocol:ssh;'))
     before = os.stat(rules_file).st_mtime_ns
     summary = write()
     check('nothing changed: not written again, not changed - no reload asked for', (summary['changed'],

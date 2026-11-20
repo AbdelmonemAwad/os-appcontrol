@@ -392,7 +392,7 @@
             'unread': "{{ lang._('no Suricata rule: its source could not be read') }}",
             'empty': "{{ lang._('no Suricata rule: its source holds no address now') }}",
             'too_long': "{{ lang._('no Suricata rule: its source is too long for one') }}",
-            'too_many': "{{ lang._('no Suricata rule: too many rules') }}",
+            'too_many': "{{ lang._('no Suricata rule: it would take more than 9,999 lines') }}",
             'refused': "{{ lang._('no Suricata rule: Suricata refused its lines') }}"
         };
         const network_names = {};

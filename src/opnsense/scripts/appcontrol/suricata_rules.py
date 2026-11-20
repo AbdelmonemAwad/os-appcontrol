@@ -49,10 +49,13 @@ classifying is on, gives:
 
 A rule gives no line when Suricata cannot tell its application - nDPI knows no name for it and it is no protocol
 Suricata reads - when its source cannot be read or holds no address now, when a line would pass Suricata's own
-limit of 8,192 characters a rule (DETECT_MAX_RULE_SIZE), or past MOST_RULES; the summary says which, for the
-page. sid: SID_BASE + the rule's place among the rules * SID_SPAN + the line's, far below OPNsense's own user
-rules, which count down from 4294967294. One alert a device a minute for each line (threshold), however many
-connections: a drop still drops each packet.
+limit of 8,192 characters a rule (DETECT_MAX_RULE_SIZE), or more than MOST_LINES; the summary says which, for
+the page. A line's sid is its own while its rule stands: from a hash of the rule's uuid and what the line matches
+(sid_of()), between SID_BASE and SID_BASE + SID_RANGE - far below OPNsense's own user rules, which count down from
+4294967294 - so a change the Intrusion Detection's page makes to a line by its sid (its rule switched off, its
+action) stays with that line when another rule is deleted or the installed nDPI gains a name, and goes with it.
+Two lines meeting on one sid: the later, in the rules' order, takes the next one free. One alert a device a minute
+for each line (threshold), however many connections: a drop still drops each packet.
 
 The file is written only when what it says changes, in one step (a file of its own beside it, renamed into place),
 and removed when no rule gives a line. What was written is kept in /var/db/os-appcontrol/suricata.json for the
@@ -61,6 +64,7 @@ and by which the page tells a rule changed since. Never fails its caller.
 """
 
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -87,9 +91,9 @@ SURICATA = '/usr/local/bin/suricata'
 SURICATA_YAML = '/usr/local/etc/suricata/suricata.yaml'
 TEST_TIMEOUT = 180      # seconds Suricata's own test of a file is given (suricata -T)
 TEST_ROUNDS = 2         # tests of one file at most: the lines refused taken out, the rest tested again
-SID_BASE = 3990000000
-SID_SPAN = 10000
-MOST_RULES = 999
+SID_BASE = 3000000000
+SID_RANGE = 1000000000  # the sids a line takes: from SID_BASE to SID_BASE + SID_RANGE - 1
+MOST_LINES = 9999       # lines one rule gives at most
 LONGEST = 8000          # characters a line at most: Suricata takes 8,192 a rule
 SOURCE_LONGEST = 7400   # characters of a source and a destination at most, the rest of a line's options left room
 THRESHOLD = 'threshold:type limit,track by_src,count 1,seconds 60;'
@@ -264,6 +268,17 @@ def message(rule):
     return MSG_SPACE.sub(' ', MSG_DROPPED.sub('', text)).strip()[:200]
 
 
+def sid_of(rule_key, match, taken):
+    """A line's sid: from a hash of its rule's key (uuid) and its matching options, the next free one when another
+    line holds it already; taken, the sids given so far, is added to."""
+    digest = hashlib.sha256(('%s\0%s' % (rule_key, match)).encode('utf-8')).hexdigest()
+    sid = SID_BASE + int(digest[:15], 16) % SID_RANGE
+    while sid in taken:
+        sid = SID_BASE + (sid - SID_BASE + 1) % SID_RANGE
+    taken.add(sid)
+    return sid
+
+
 def build(conf, catalogue, devices, by_dev, pf, own=()):
     """(the template's rules, {uuid: what each rule gave}): for each rule its number, verb, source, destination,
     message and lines - each line Suricata's protocol, its matching options and its sid - or why it gives none.
@@ -271,14 +286,12 @@ def build(conf, catalogue, devices, by_dev, pf, own=()):
     hosts = catalogue.get('hosts') or {}
     out, report = [], {}
     dest = destination(own, [n for nets in by_dev.values() for n in nets])
+    taken = set()
     for rule in conf['rules']:
-        said = {'number': rule['number'], 'lines': 0, 'names': 0, 'protocol': None, 'reason': None, 'sids': None}
+        said = {'number': rule['number'], 'lines': 0, 'names': 0, 'protocol': None, 'reason': None}
         report[rule['uuid'] or str(rule['number'])] = said
         if not rule['enabled']:
             said['reason'] = 'disabled'
-            continue
-        if rule['number'] > MOST_RULES:
-            said['reason'] = 'too_many'
             continue
         # what its source holds now, whether Suricata can tell its application or not: the page says a rule acts on
         # no device when its source cannot be read or holds no device's address (status.py rules)
@@ -299,7 +312,7 @@ def build(conf, catalogue, devices, by_dev, pf, own=()):
         if not lines:
             said['reason'] = 'no_match'
             continue
-        if len(lines) >= SID_SPAN:
+        if len(lines) > MOST_LINES:
             said['reason'] = 'too_many'
             continue
         if where is None:
@@ -308,14 +321,14 @@ def build(conf, catalogue, devices, by_dev, pf, own=()):
         if len(where) + len(dest) > SOURCE_LONGEST:
             said['reason'] = 'too_long'
             continue
-        first = SID_BASE + rule['number'] * SID_SPAN + 1
-        said['lines'], said['sids'] = len(lines), [first, first + len(lines) - 1]
+        said['lines'] = len(lines)
         # the comment line of the rule says its application and source as config.xml has them, on one line: a line
         # break written there by hand would begin a line of its own, a rule for Suricata
         out.append({'number': rule['number'], 'uuid': rule['uuid'], 'action': rule['action'], 'app': one_line(rule['app']),
                     'verb': 'drop' if rule['action'] == 'block' else 'alert', 'source': where, 'destination': dest,
                     'source_text': one_line(('not ' if rule['not'] else '') + ','.join(rule['source'])), 'msg': message(rule),
-                    'lines': [{'proto': proto, 'match': match, 'sid': first + i} for i, (proto, match) in enumerate(lines)]})
+                    'lines': [{'proto': proto, 'match': match, 'sid': sid_of(key(rule), match, taken)}
+                              for proto, match in lines]})
     return out, report
 
 
@@ -520,7 +533,7 @@ def produce(summary, conf, applied, config, catalogue_path=None, path=None, temp
         if long_ones:
             for rule in rules:
                 if any(line['sid'] in long_ones for line in rule['lines']):
-                    summary['rules'][key(rule)].update({'reason': 'too_long', 'lines': 0, 'sids': None})
+                    summary['rules'][key(rule)].update({'reason': 'too_long', 'lines': 0})
             rules = [rule for rule in rules if not any(line['sid'] in long_ones for line in rule['lines'])]
             text = None
             continue
@@ -546,7 +559,7 @@ def produce(summary, conf, applied, config, catalogue_path=None, path=None, temp
             rule['lines'] = [line for line in rule['lines'] if line['sid'] not in refused]
             said['lines'] = len(rule['lines'])
             if not rule['lines']:
-                said.update({'reason': 'refused', 'sids': None})
+                said['reason'] = 'refused'
         rules = [rule for rule in rules if rule['lines']]
         text = None
     summary['lines'] = sum(len(rule['lines']) for rule in rules)
