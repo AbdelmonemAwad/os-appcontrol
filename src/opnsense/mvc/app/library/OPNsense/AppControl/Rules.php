@@ -103,13 +103,14 @@ class Rules
      * What the page offers for a source, in the form OPNsense's own rule pages give replaceInputWithSelector():
      * a single host or network written by hand; the networks - any, and each interface's; the aliases of
      * addresses and networks, not those of ports nor this plugin's own. $interfaces: [name => description];
-     * $aliases: [[name, type]].
+     * $aliases: [[name, type]]. An interface's description goes into its label escaped, as OPNsense's own
+     * listNetworkSelectOptionsAction() gives it (FilterBaseController): the selector writes the labels as markup.
      */
     public static function sourceOptions(array $interfaces, array $aliases)
     {
         $networks = [];
         foreach ($interfaces as $name => $description) {
-            $networks[$name] = sprintf(gettext('%s network'), $description !== '' ? $description : strtoupper($name));
+            $networks[$name] = sprintf(gettext('%s network'), htmlspecialchars($description !== '' ? $description : strtoupper($name)));
         }
         natcasesort($networks);
         $names = [];

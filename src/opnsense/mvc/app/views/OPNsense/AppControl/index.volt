@@ -486,16 +486,45 @@
             ajaxGet('/api/appcontrol/service/rules', {}, draw_ids);
         }
 
-        /* the rule dialog's source: OPNsense's own selector of networks and aliases, with an address written by hand */
+        /* the rule dialog's source: OPNsense's own selector of networks and aliases, with an address written by hand;
+           its labels come escaped, as OPNsense's own, and are made plain for the grid, which escapes what it writes */
         ajaxGet('/api/appcontrol/settings/list_network_select_options', {}, function (data) {
             if (!data || !data.single) {
                 return;
             }
             $.each((data.networks || {}).items || {}, function (key, label) {
-                network_names[key] = label;
+                network_names[key] = plain(label);
             });
             $('.net_selector').each(function () {
                 $(this).replaceInputWithSelector(data, $(this).hasClass('net_selector_multi'));
+                /* as OPNsense's own rule page has it (filter_rule.volt): "Single host or Network" and "any" stay alone -
+                   the model takes either only by itself */
+                if ($(this).hasClass('net_selector_multi')) {
+                    $("select[for='" + $(this).attr('id') + "']").on('shown.bs.select', function () {
+                        $(this).data('previousValue', $(this).val());
+                    }).change(function () {
+                        const prev = Array.isArray($(this).data('previousValue')) ? $(this).data('previousValue') : [];
+                        const is_single = $(this).val().includes('') || $(this).val().includes('any');
+                        const was_single = prev.includes('') || prev.includes('any');
+                        let refresh = false;
+                        if (was_single && is_single && $(this).val().length > 1) {
+                            $(this).val($(this).val().filter(value => !prev.includes(value)));
+                            refresh = true;
+                        } else if (is_single && $(this).val().length > 1) {
+                            if ($(this).val().includes('any') && !prev.includes('any')) {
+                                $(this).val('any');
+                            } else {
+                                $(this).val('');
+                            }
+                            refresh = true;
+                        }
+                        if (refresh) {
+                            $(this).selectpicker('refresh');
+                            $(this).trigger('change');
+                        }
+                        $(this).data('previousValue', $(this).val());
+                    });
+                }
             });
             $('#grid-rules').bootgrid('reload');
         });
@@ -520,8 +549,9 @@
         });
 
         /* Apply's answer, one line: what changed, what failed, what was handed back from hardware and what the
-           hand-back could not do - kept for the next Apply - and the Suricata rules written or taken away */
-        function show_result(target, data) {
+           hand-back could not do - kept for the next Apply - and the Suricata rules written or taken away; with none
+           of these, idle: the Settings tab's says no alias changed, the Rules tab's that its rules were applied */
+        function show_result(target, data, idle) {
             const lines = (data && data.changes ? data.changes : []).concat(data && data.errors ? data.errors : []);
             const released = data && data.released ? data.released.released : null;
             if (typeof released === 'number' && released > 0) {
@@ -539,7 +569,7 @@
             }
             $(target).attr('class', data && data.status === 'ok' ? (late.length || not_written.length ? 'alert alert-warning' : 'text-muted')
                 : 'alert alert-danger')
-                .text(plain(lines.length ? lines.join(' · ') : "{{ lang._('Nothing to change in aliases.') }}")).show();
+                .text(plain(lines.length ? lines.join(' · ') : idle)).show();
             refresh();
             $('#grid-apps').bootgrid('reload');
             $('#grid-categories').bootgrid('reload');
@@ -559,7 +589,7 @@
             saveFormToEndpoint('/api/appcontrol/settings/set', 'frm_general', function () {
                 ajaxCall('/api/appcontrol/service/reconfigure', {}, function (data) {
                     done();
-                    show_result('#ac-result', data);
+                    show_result('#ac-result', data, "{{ lang._('Nothing to change in aliases.') }}");
                 });
             }, false, done);
         });
@@ -571,7 +601,7 @@
             ajaxCall('/api/appcontrol/service/reconfigure', {}, function (data) {
                 $progress.removeClass('fa fa-spinner fa-pulse');
                 $button.prop('disabled', false);
-                show_result('#ac-rules-result', data);
+                show_result('#ac-rules-result', data, "{{ lang._('The changes have been applied successfully.') }}");
             });
         });
 

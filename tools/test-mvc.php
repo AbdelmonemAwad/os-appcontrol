@@ -339,6 +339,10 @@ namespace {
         'the Rules grid\'s calls: get, add, set, del and toggle, each on rules.rule, as the dialog posts it under "rule"');
 
     /* the source selector */
+    \OPNsense\Core\Config::$interfaces = ['wan' => 'WAN', 'lan' => 'LAN', 'opt2' => 'GUEST', 'opt3' => null, 'opt4' => 'R&D <lab>'];
+    $escaped = (new SettingsController())->listNetworkSelectOptionsAction()['networks']['items']['opt4'] ?? null;
+    check($escaped === 'R&amp;D &lt;lab&gt; network', 'the source selector: an interface\'s description in its label escaped, ' .
+        'as OPNsense\'s own selector options are - the selector writes them as markup');
     \OPNsense\Core\Config::$interfaces = ['wan' => 'WAN', 'lan' => 'LAN', 'opt2' => 'GUEST', 'opt3' => null];
     \OPNsense\Firewall\Alias::$given = [['Teachers', 'host'], ['web_ports', 'port'], ['appcontrol_YouTube', 'external'],
         ['Countries', 'geoip'], ['__lan_network', 'internal']];
