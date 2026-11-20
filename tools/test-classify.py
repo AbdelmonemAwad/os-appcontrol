@@ -1957,6 +1957,32 @@ check('ifconfig -a: each device\'s networks, link-local left out, each once',
       {d: [str(n) for n in nets] for d, nets in BY_DEV.items()},
       {'em0': ['203.0.113.0/24'], 'em1': ['192.0.2.0/24', '2001:db8:1::/64'], 'em2': ['198.51.100.128/25'],
        'lo0': ['127.0.0.0/8', '::1/128'], 'pppoe0': ['203.0.113.50/32']})
+# OpenVPN's and WireGuard's groups: config.xml's interfaces openvpn and wireguard, whose device is the group itself
+GROUPS_TEXT = IFCONFIG_TEXT + '''ovpns1: flags=1008051<UP,POINTOPOINT,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\toptions=80000<LINKSTATE>
+\tinet 10.0.0.1 netmask 0xffffff00
+\tgroups: tun openvpn
+\tnd6 options=101<PERFORMNUD,NO_DAD>
+ovpns2: flags=1008051<UP,POINTOPOINT,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 1500
+\tinet6 2001:db8:8::1 prefixlen 64
+\tgroups: tun openvpn
+wg0: flags=10080c1<UP,RUNNING,NOARP,MULTICAST,LOWER_UP> metric 0 mtu 1420
+\tinet 172.16.0.1 netmask 0xffffff00
+\tgroups: wg wireguard
+'''
+BY_GROUP = tables.device_networks(GROUPS_TEXT)
+check('ifconfig -a\'s groups: lines - an interface group holds its members\' networks together, as pf\'s (group:network) '
+      'does: OpenVPN\'s from both its servers, WireGuard\'s; a device keeps its own',
+      ({g: [str(n) for n in BY_GROUP[g]] for g in ('openvpn', 'wireguard', 'tun')}, [str(n) for n in BY_GROUP['ovpns1']]),
+      ({'openvpn': ['10.0.0.0/24', '2001:db8:8::/64'], 'wireguard': ['172.16.0.0/24'],
+        'tun': ['10.0.0.0/24', '2001:db8:8::/64']}, ['10.0.0.0/24']))
+group_where = classify.Where()
+group_policy = {'TLS': {'table': 'appcontrol_TLS', 'everyone': False,
+                        'rules': [{'uuid': 'u-vpn', 'number': 1, 'source': ['openvpn'], 'not': False}]}}
+group_where.refresh(group_policy, {'openvpn': 'openvpn', 'wireguard': 'wireguard'}, BY_GROUP, tables.Pf(run=FakePf()))
+check('a source of OpenVPN\'s group: a VPN client\'s device is one of it, a LAN device not, nothing unread',
+      ([group_where.holds(group_policy['TLS']['rules'][0], a) for a in ('10.0.0.5', '2001:db8:8::5', '192.0.2.10')],
+       group_where.unread), ([True, True, False], {}))
 src_pf = FakePf({'Teachers': {'192.0.2.40', '192.0.2.41'}, 'Wing': {'192.0.2.0/25', '!192.0.2.64/26', '192.0.2.70'}})
 RESOLVED = {e: tables.resolve(e, DEVICES, BY_DEV, tables.Pf(run=src_pf))
             for e in ('any', 'lan', 'opt2', '198.51.100.7', '2001:db8:9::/48', 'Teachers', 'Gone', '(self)', 'lanip')}

@@ -238,6 +238,12 @@ check('no source holds an address of the firewall\'s own, as Suricata reads it; 
            (['any'], False, '203.0.113.9'), (['lan'], False, '192.0.2.10'), (['lan'], False, '2001:db8:1::10'),
            (['opt2'], False, '198.51.100.130'), (['Teachers'], True, '192.0.2.10'), (['Teachers'], True, '192.0.2.40'))]),
       ([], [True, True, True, True, True, False]))
+VPN_TEXT = IFCONFIG_TEXT + ('ovpns1: flags=1008051<UP,POINTOPOINT,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 1500\n'
+                            '\tinet 10.0.0.1 netmask 0xffffff00\n\tgroups: tun openvpn\n')
+check('a source of OpenVPN\'s group - its device the group itself: the networks of its members, the firewall\'s address '
+      'there an exception', sr.source(rule(source=['openvpn']), dict(DEVICES, openvpn='openvpn'),
+                                      tables.device_networks(VPN_TEXT), PF, tables.addresses(VPN_TEXT))[:2],
+      ('[10.0.0.0/24,!10.0.0.1]', None))
 check('inverted, an alias holding every address - no device left, and Suricata refuses a group that negates the whole '
       'space: no line; holding every IPv4 address - every IPv6 one but the firewall\'s, written without a negated whole',
       [sr.source(rule(source=['All'], **{'not': True}), DEVICES, BY_DEV, PF, OWN)[:2],

@@ -351,8 +351,11 @@ IFCONFIG_HEAD = re.compile(r'^(\S+?):\s+flags=')
 
 def device_networks(text):
     """{device: [network]} of `ifconfig -a`: the networks of each device's addresses, in its order, each once;
-    a link-local one left out - no device out there is reached by it."""
-    out, dev = {}, None
+    a link-local one left out - no device out there is reached by it. And {group: [network]} for each interface
+    group its groups: lines name, its members' networks together, as pf's (group:network) holds them: OpenVPN's
+    and WireGuard's groups are interfaces of config.xml whose device is the group itself (openvpn, wireguard), and
+    no device of that name is listed. A device of a group's name is that device."""
+    out, dev, groups = {}, None, {}
     for line in (text or '').splitlines():
         head = IFCONFIG_HEAD.match(line)
         if head:
@@ -360,12 +363,25 @@ def device_networks(text):
             out.setdefault(dev, [])
             continue
         words = line.split()
+        if dev is not None and words[:1] == ['groups:']:
+            for group in words[1:]:
+                groups.setdefault(group, []).append(dev)
+            continue
         if dev is None or len(words) < 2 or words[0] not in ('inet', 'inet6'):
             continue
         found = ifconfig_address(words)
         if found is None or found.network.is_link_local or found.network in out[dev]:
             continue
         out[dev].append(found.network)
+    for group, members in groups.items():
+        if group in out:
+            continue
+        nets = []
+        for member in members:
+            for net in out.get(member, []):
+                if net not in nets:
+                    nets.append(net)
+        out[group] = nets
     return out
 
 
